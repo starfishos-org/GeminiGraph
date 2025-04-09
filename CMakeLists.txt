@@ -18,7 +18,7 @@ if(CMAKE_C_COMPILER MATCHES "musl-gcc")
 endif()
 
 # 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -g -fopenmp -march=native")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -g -fopenmp -march=native")
 # 如果需要启用宏定义，取消下面行的注释
 # add_definitions(-DPRINT_DEBUG_MESSAGES)
 
@@ -36,10 +36,12 @@ foreach(target ${TARGETS})
     add_executable(${target} toolkits/${target}.cpp ${HEADERS})
 endforeach()
 
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
 if(${OS} STREQUAL "CHCORE")
     add_custom_target(
         gemini-copy-data
-        COMMAND rsync -a ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/* ${build_ramdisk_dir}/
+        COMMAND rsync -a ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/pagerank ${build_ramdisk_dir}/
         DEPENDS ${TARGETS}
     )
     add_dependencies(ramdisk gemini-copy-data)
