@@ -30,5 +30,4 @@ set(TARGETS bc bfs cc pagerank sssp)
 # 添加每个工具的可执行文件
 foreach(target ${TARGETS})
     add_executable(${target} toolkits/${target}.cpp ${HEADERS})
-    target_link_libraries(${target} numa)
 endforeach()

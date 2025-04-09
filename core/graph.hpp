@@ -24,7 +24,7 @@ Copyright (c) 2015-2016 Xiaowei Zhu, Tsinghua University
 #include <fcntl.h>
 #include <malloc.h>
 #include <sys/mman.h>
-#include <numa.h>
+#include <thread>
 #include <omp.h>
 
 #include <string>
@@ -143,7 +143,8 @@ public:
   Graph() {
     partition_id = 0;
     partitions = 1;
-    threads = numa_num_configured_cpus();
+    // threads = numa_num_configured_cpus();
+    threads = std::thread::hardware_concurrency();
     sockets = 1;
     // sockets = numa_num_configured_nodes();
     threads_per_socket = threads / sockets;
