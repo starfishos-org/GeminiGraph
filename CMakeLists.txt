@@ -18,7 +18,7 @@ if(CMAKE_C_COMPILER MATCHES "musl-gcc")
 endif()
 
 # 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -g -fopenmp -march=native")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -g -fopenmp -march=native -fPIE -pie ")
 # 如果需要启用宏定义，取消下面行的注释
 # add_definitions(-DPRINT_DEBUG_MESSAGES)
 
@@ -33,6 +33,7 @@ set(TARGETS bc bfs cc pagerank sssp)
 
 # 添加每个工具的可执行文件
 foreach(target ${TARGETS})
+    # target_link_options(${target} PRIVATE -static)
     add_executable(${target} toolkits/${target}.cpp ${HEADERS})
 endforeach()
 
@@ -42,6 +43,7 @@ if(${OS} STREQUAL "CHCORE")
     add_custom_target(
         gemini-copy-data
         COMMAND rsync -a ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/pagerank ${build_ramdisk_dir}/
+        COMMAND rsync -a ${CMAKE_CURRENT_SOURCE_DIR}/cnr-2000.binedgelist ${build_ramdisk_dir}/
         DEPENDS ${TARGETS}
     )
     add_dependencies(ramdisk gemini-copy-data)
