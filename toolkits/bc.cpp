@@ -404,7 +404,7 @@ void compute_compact(Graph<Empty> * graph, VertexId root) {
 }
 
 int main(int argc, char ** argv) {
-  MPI_Instance mpi(&argc, &argv);
+  // MPI_Instance mpi(&argc, &argv);
 
   if (argc<4) {
     printf("bc [file] [vertices] [root]\n");

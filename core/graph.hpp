@@ -141,6 +141,8 @@ public:
   MessageBuffer *** recv_buffer; // MessageBuffer* [partitions] [sockets]; numa-aware
 
   Graph() {
+    partition_id = 0;
+    partitions = 1;
     threads = numa_num_configured_cpus();
     sockets = 1;
     // sockets = numa_num_configured_nodes();
@@ -197,8 +199,8 @@ public:
     // printf("interleave on %s\n", nodestring);
     #endif
 
-    MPI_Comm_rank(MPI_COMM_WORLD, &partition_id);
-    MPI_Comm_size(MPI_COMM_WORLD, &partitions);
+    // MPI_Comm_rank(MPI_COMM_WORLD, &partition_id);
+    // MPI_Comm_size(MPI_COMM_WORLD, &partitions);
     send_buffer = new MessageBuffer ** [partitions];
     recv_buffer = new MessageBuffer ** [partitions];
     for (int i=0;i<partitions;i++) {
@@ -214,7 +216,7 @@ public:
 
     alpha = 8 * (partitions - 1);
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    // MPI_Barrier(MPI_COMM_WORLD);
   }
 
   // fill a vertex array with a specific value
@@ -270,7 +272,7 @@ public:
         }
         fclose(fout);
       }
-      MPI_Barrier(MPI_COMM_WORLD);
+      // MPI_Barrier(MPI_COMM_WORLD);
     }
     int fd = open(path.c_str(), O_RDWR);
     assert(fd!=-1);
@@ -310,18 +312,18 @@ public:
   // gather a vertex array
   template<typename T>
   void gather_vertex_array(T * array, int root) {
-    if (partition_id!=root) {
-      MPI_Send(array + partition_offset[partition_id], sizeof(T) * owned_vertices, MPI_CHAR, root, GatherVertexArray, MPI_COMM_WORLD);
-    } else {
-      for (int i=0;i<partitions;i++) {
-        if (i==partition_id) continue;
-        MPI_Status recv_status;
-        MPI_Recv(array + partition_offset[i], sizeof(T) * (partition_offset[i + 1] - partition_offset[i]), MPI_CHAR, i, GatherVertexArray, MPI_COMM_WORLD, &recv_status);
-        int length;
-        MPI_Get_count(&recv_status, MPI_CHAR, &length);
-        assert(length == sizeof(T) * (partition_offset[i + 1] - partition_offset[i]));
-      }
-    }
+    // if (partition_id!=root) {
+    //   MPI_Send(array + partition_offset[partition_id], sizeof(T) * owned_vertices, MPI_CHAR, root, GatherVertexArray, MPI_COMM_WORLD);
+    // } else {
+    //   for (int i=0;i<partitions;i++) {
+    //     if (i==partition_id) continue;
+    //     MPI_Status recv_status;
+    //     MPI_Recv(array + partition_offset[i], sizeof(T) * (partition_offset[i + 1] - partition_offset[i]), MPI_CHAR, i, GatherVertexArray, MPI_COMM_WORLD, &recv_status);
+    //     int length;
+    //     MPI_Get_count(&recv_status, MPI_CHAR, &length);
+    //     assert(length == sizeof(T) * (partition_offset[i + 1] - partition_offset[i]));
+    //   }
+    // }
   }
 
   // allocate a vertex subset
@@ -350,11 +352,11 @@ public:
   // load a directed graph and make it undirected
   void load_undirected_from_directed(std::string path, VertexId vertices) {
     double prep_time = 0;
-    prep_time -= MPI_Wtime();
+    prep_time -= WTime();
 
     symmetric = true;
 
-    MPI_Datatype vid_t = get_mpi_data_type<VertexId>();
+    // MPI_Datatype vid_t = get_mpi_data_type<VertexId>();
 
     this->vertices = vertices;
     long total_bytes = file_size(path.c_str());
@@ -399,7 +401,7 @@ public:
         __sync_fetch_and_add(&out_degree[dst], 1);
       }
     }
-    MPI_Allreduce(MPI_IN_PLACE, out_degree, vertices, vid_t, MPI_SUM, MPI_COMM_WORLD);
+    // MPI_Allreduce(MPI_IN_PLACE, out_degree, vertices, vid_t, MPI_SUM, MPI_COMM_WORLD);
 
     // locality-aware chunking
     partition_offset = new VertexId [partitions + 1];
@@ -428,16 +430,16 @@ public:
     assert(partition_offset[partitions]==vertices);
     owned_vertices = partition_offset[partition_id+1] - partition_offset[partition_id];
     // check consistency of partition boundaries
-    VertexId * global_partition_offset = new VertexId [partitions + 1];
-    MPI_Allreduce(partition_offset, global_partition_offset, partitions + 1, vid_t, MPI_MAX, MPI_COMM_WORLD);
-    for (int i=0;i<=partitions;i++) {
-      assert(partition_offset[i] == global_partition_offset[i]);
-    }
-    MPI_Allreduce(partition_offset, global_partition_offset, partitions + 1, vid_t, MPI_MIN, MPI_COMM_WORLD);
-    for (int i=0;i<=partitions;i++) {
-      assert(partition_offset[i] == global_partition_offset[i]);
-    }
-    #ifdef PRINT_DEBUG_MESSAGES
+    // VertexId * global_partition_offset = new VertexId [partitions + 1];
+    // MPI_Allreduce(partition_offset, global_partition_offset, partitions + 1,
+    // vid_t, MPI_MAX, MPI_COMM_WORLD); for (int i=0;i<=partitions;i++) {
+    //   assert(partition_offset[i] == global_partition_offset[i]);
+    // }
+    // MPI_Allreduce(partition_offset, global_partition_offset, partitions + 1,
+    // vid_t, MPI_MIN, MPI_COMM_WORLD); for (int i=0;i<=partitions;i++) {
+    //   assert(partition_offset[i] == global_partition_offset[i]);
+    // }
+#ifdef PRINT_DEBUG_MESSAGES
     if (partition_id==0) {
       for (int i=0;i<partitions;i++) {
         EdgeId part_out_edges = 0;
@@ -447,9 +449,9 @@ public:
         printf("|V'_%d| = %u |E_%d| = %lu\n", i, partition_offset[i+1] - partition_offset[i], i, part_out_edges);
       }
     }
-    MPI_Barrier(MPI_COMM_WORLD);
+    // MPI_Barrier(MPI_COMM_WORLD);
     #endif
-    delete [] global_partition_offset;
+    // delete [] global_partition_offset;
     {
       // NUMA-aware sub-chunking
       local_partition_offset = new VertexId [sockets + 1];
@@ -513,40 +515,56 @@ public:
       outgoing_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
     }
     {
-      std::thread recv_thread_dst([&](){
-        int finished_count = 0;
-        MPI_Status recv_status;
-        while (finished_count < partitions) {
-          MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
-          int i = recv_status.MPI_SOURCE;
-          assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
-          int recv_bytes;
-          MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
-          if (recv_bytes==1) {
-            finished_count += 1;
-            char c;
-            MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            continue;
+      // std::thread recv_thread_dst([&]() {
+      //   int finished_count = 0;
+      //   MPI_Status recv_status;
+      //   while (finished_count < partitions) {
+      //     MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
+      //     int i = recv_status.MPI_SOURCE;
+      //     assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
+      //     int recv_bytes;
+      //     MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
+      //     if (recv_bytes==1) {
+      //       finished_count += 1;
+      //       char c;
+      //       MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //       continue;
+      //     }
+      //     assert(recv_bytes % edge_unit_size == 0);
+      //     int recv_edges = recv_bytes / edge_unit_size;
+      //     MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //     // #pragma omp parallel for
+      //     for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
+      //       VertexId src = recv_buffer[e_i].src;
+      //       VertexId dst = recv_buffer[e_i].dst;
+      //       assert(dst >= partition_offset[partition_id] && dst < partition_offset[partition_id+1]);
+      //       int dst_part = get_local_partition_id(dst);
+      //       if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
+      //         outgoing_adj_bitmap[dst_part]->set_bit(src);
+      //         outgoing_adj_index[dst_part][src] = 0;
+      //       }
+      //       __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+      //     }
+      //     recv_outgoing_edges += recv_edges;
+      //   }
+      // });
+      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData>* recv_buffer,
+                                         int recv_edges) {
+        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(dst >= partition_offset[partition_id] &&
+                 dst < partition_offset[partition_id + 1]);
+          int dst_part = get_local_partition_id(dst);
+          if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
+            outgoing_adj_bitmap[dst_part]->set_bit(src);
+            outgoing_adj_index[dst_part][src] = 0;
           }
-          assert(recv_bytes % edge_unit_size == 0);
-          int recv_edges = recv_bytes / edge_unit_size;
-          MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-          // #pragma omp parallel for
-          for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
-            VertexId src = recv_buffer[e_i].src;
-            VertexId dst = recv_buffer[e_i].dst;
-            assert(dst >= partition_offset[partition_id] && dst < partition_offset[partition_id+1]);
-            int dst_part = get_local_partition_id(dst);
-            if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
-              outgoing_adj_bitmap[dst_part]->set_bit(src);
-              outgoing_adj_index[dst_part][src] = 0;
-            }
-            __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
-          }
-          recv_outgoing_edges += recv_edges;
+          __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
         }
-      });
-      for (int i=0;i<partitions;i++) {
+        recv_outgoing_edges += recv_edges;
+      };
+      for (int i = 0; i < partitions; i++) {
         buffered_edges[i] = 0;
       }
       assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
@@ -567,7 +585,10 @@ public:
           memcpy(send_buffer[i].data() + edge_unit_size * buffered_edges[i], &read_edge_buffer[e_i], edge_unit_size);
           buffered_edges[i] += 1;
           if (buffered_edges[i] == CHUNKSIZE) {
-            MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            deal_with_shuffle_graph(
+                (EdgeUnit<EdgeData>*)send_buffer[i].data(),
+                buffered_edges[i]);
             buffered_edges[i] = 0;
           }
         }
@@ -583,21 +604,29 @@ public:
           memcpy(send_buffer[i].data() + edge_unit_size * buffered_edges[i], &read_edge_buffer[e_i], edge_unit_size);
           buffered_edges[i] += 1;
           if (buffered_edges[i] == CHUNKSIZE) {
-            MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i],
+            //          MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            deal_with_shuffle_graph(
+                (EdgeUnit<EdgeData>*)send_buffer[i].data(),
+                buffered_edges[i]);
             buffered_edges[i] = 0;
           }
         }
       }
       for (int i=0;i<partitions;i++) {
         if (buffered_edges[i]==0) continue;
-        MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i],
+        // MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        deal_with_shuffle_graph(
+            (EdgeUnit<EdgeData>*)send_buffer[i].data(),
+            buffered_edges[i]);
         buffered_edges[i] = 0;
       }
-      for (int i=0;i<partitions;i++) {
-        char c = 0;
-        MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
-      }
-      recv_thread_dst.join();
+      // for (int i=0;i<partitions;i++) {
+      //   char c = 0;
+      //   MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+      // }
+      // recv_thread_dst.join();
       #ifdef PRINT_DEBUG_MESSAGES
       printf("machine(%d) got %lu symmetric edges\n", partition_id, recv_outgoing_edges);
       #endif
@@ -637,38 +666,55 @@ public:
       outgoing_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * outgoing_edges[s_i]);
     }
     {
-      std::thread recv_thread_dst([&](){
-        int finished_count = 0;
-        MPI_Status recv_status;
-        while (finished_count < partitions) {
-          MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
-          int i = recv_status.MPI_SOURCE;
-          assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
-          int recv_bytes;
-          MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
-          if (recv_bytes==1) {
-            finished_count += 1;
-            char c;
-            MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            continue;
-          }
-          assert(recv_bytes % edge_unit_size == 0);
-          int recv_edges = recv_bytes / edge_unit_size;
-          MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-          #pragma omp parallel for
-          for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
-            VertexId src = recv_buffer[e_i].src;
-            VertexId dst = recv_buffer[e_i].dst;
-            assert(dst >= partition_offset[partition_id] && dst < partition_offset[partition_id+1]);
-            int dst_part = get_local_partition_id(dst);
-            EdgeId pos = __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
-            outgoing_adj_list[dst_part][pos].neighbour = dst;
-            if (!std::is_same<EdgeData, Empty>::value) {
-              outgoing_adj_list[dst_part][pos].edge_data = recv_buffer[e_i].edge_data;
-            }
+      // std::thread recv_thread_dst([&]() {
+      //   int finished_count = 0;
+      //   MPI_Status recv_status;
+      //   while (finished_count < partitions) {
+      //     MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
+      //     int i = recv_status.MPI_SOURCE;
+      //     assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
+      //     int recv_bytes;
+      //     MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
+      //     if (recv_bytes==1) {
+      //       finished_count += 1;
+      //       char c;
+      //       MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //       continue;
+      //     }
+      //     assert(recv_bytes % edge_unit_size == 0);
+      //     int recv_edges = recv_bytes / edge_unit_size;
+      //     MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //     #pragma omp parallel for
+      //     for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
+      //       VertexId src = recv_buffer[e_i].src;
+      //       VertexId dst = recv_buffer[e_i].dst;
+      //       assert(dst >= partition_offset[partition_id] && dst < partition_offset[partition_id+1]);
+      //       int dst_part = get_local_partition_id(dst);
+      //       EdgeId pos = __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+      //       outgoing_adj_list[dst_part][pos].neighbour = dst;
+      //       if (!std::is_same<EdgeData, Empty>::value) {
+      //         outgoing_adj_list[dst_part][pos].edge_data = recv_buffer[e_i].edge_data;
+      //       }
+      //     }
+      //   }
+      // });
+      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
+                                         int recv_edges) {
+        #pragma omp parallel for
+        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(dst >= partition_offset[partition_id] &&
+                 dst < partition_offset[partition_id + 1]);
+          int dst_part = get_local_partition_id(dst);
+          EdgeId pos = __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+          outgoing_adj_list[dst_part][pos].neighbour = dst;
+          if (!std::is_same<EdgeData, Empty>::value) {
+            outgoing_adj_list[dst_part][pos].edge_data =
+                recv_buffer[e_i].edge_data;
           }
         }
-      });
+      };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
       }
@@ -690,7 +736,8 @@ public:
           memcpy(send_buffer[i].data() + edge_unit_size * buffered_edges[i], &read_edge_buffer[e_i], edge_unit_size);
           buffered_edges[i] += 1;
           if (buffered_edges[i] == CHUNKSIZE) {
-            MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            deal_with_shuffle_graph((EdgeUnit<EdgeData>*)send_buffer[i].data(), buffered_edges[i]);
             buffered_edges[i] = 0;
           }
         }
@@ -706,21 +753,25 @@ public:
           memcpy(send_buffer[i].data() + edge_unit_size * buffered_edges[i], &read_edge_buffer[e_i], edge_unit_size);
           buffered_edges[i] += 1;
           if (buffered_edges[i] == CHUNKSIZE) {
-            MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            deal_with_shuffle_graph((EdgeUnit<EdgeData> *)send_buffer[i].data(),
+                                    buffered_edges[i]);
             buffered_edges[i] = 0;
           }
         }
       }
       for (int i=0;i<partitions;i++) {
         if (buffered_edges[i]==0) continue;
-        MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        deal_with_shuffle_graph((EdgeUnit<EdgeData> *)send_buffer[i].data(),
+                                buffered_edges[i]);
         buffered_edges[i] = 0;
       }
-      for (int i=0;i<partitions;i++) {
-        char c = 0;
-        MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
-      }
-      recv_thread_dst.join();
+      // for (int i=0;i<partitions;i++) {
+      //   char c = 0;
+      //   MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+      // }
+      // recv_thread_dst.join();
     }
     for (int s_i=0;s_i<sockets;s_i++) {
       for (VertexId p_v_i=0;p_v_i<compressed_outgoing_adj_vertices[s_i];p_v_i++) {
@@ -729,7 +780,7 @@ public:
         outgoing_adj_index[s_i][v_i+1] = compressed_outgoing_adj_index[s_i][p_v_i+1].index;
       }
     }
-    MPI_Barrier(MPI_COMM_WORLD);
+    // MPI_Barrier(MPI_COMM_WORLD);
 
     incoming_edges = outgoing_edges;
     incoming_adj_index = outgoing_adj_index;
@@ -737,7 +788,7 @@ public:
     incoming_adj_bitmap = outgoing_adj_bitmap;
     compressed_incoming_adj_vertices = compressed_outgoing_adj_vertices;
     compressed_incoming_adj_index = compressed_outgoing_adj_index;
-    MPI_Barrier(MPI_COMM_WORLD);
+    // MPI_Barrier(MPI_COMM_WORLD);
 
     delete [] buffered_edges;
     delete [] send_buffer;
@@ -748,7 +799,7 @@ public:
     tune_chunks();
     tuned_chunks_sparse = tuned_chunks_dense;
 
-    prep_time += MPI_Wtime();
+    prep_time += WTime();
 
     #ifdef PRINT_DEBUG_MESSAGES
     if (partition_id==0) {
@@ -772,11 +823,11 @@ public:
   // load a directed graph from path
   void load_directed(std::string path, VertexId vertices) {
     double prep_time = 0;
-    prep_time -= MPI_Wtime();
+    prep_time -= WTime();
 
     symmetric = false;
 
-    MPI_Datatype vid_t = get_mpi_data_type<VertexId>();
+    // MPI_Datatype vid_t = get_mpi_data_type<VertexId>();
 
     this->vertices = vertices;
     long total_bytes = file_size(path.c_str());
@@ -820,7 +871,7 @@ public:
         __sync_fetch_and_add(&out_degree[src], 1);
       }
     }
-    MPI_Allreduce(MPI_IN_PLACE, out_degree, vertices, vid_t, MPI_SUM, MPI_COMM_WORLD);
+    // MPI_Allreduce(MPI_IN_PLACE, out_degree, vertices, vid_t, MPI_SUM, MPI_COMM_WORLD);
 
     // locality-aware chunking
     partition_offset = new VertexId [partitions + 1];
@@ -849,15 +900,15 @@ public:
     assert(partition_offset[partitions]==vertices);
     owned_vertices = partition_offset[partition_id+1] - partition_offset[partition_id];
     // check consistency of partition boundaries
-    VertexId * global_partition_offset = new VertexId [partitions + 1];
-    MPI_Allreduce(partition_offset, global_partition_offset, partitions + 1, vid_t, MPI_MAX, MPI_COMM_WORLD);
-    for (int i=0;i<=partitions;i++) {
-      assert(partition_offset[i] == global_partition_offset[i]);
-    }
-    MPI_Allreduce(partition_offset, global_partition_offset, partitions + 1, vid_t, MPI_MIN, MPI_COMM_WORLD);
-    for (int i=0;i<=partitions;i++) {
-      assert(partition_offset[i] == global_partition_offset[i]);
-    }
+    // VertexId * global_partition_offset = new VertexId [partitions + 1];
+    // MPI_Allreduce(partition_offset, global_partition_offset, partitions + 1, vid_t, MPI_MAX, MPI_COMM_WORLD);
+    // for (int i=0;i<=partitions;i++) {
+    //   assert(partition_offset[i] == global_partition_offset[i]);
+    // }
+    // MPI_Allreduce(partition_offset, global_partition_offset, partitions + 1, vid_t, MPI_MIN, MPI_COMM_WORLD);
+    // for (int i=0;i<=partitions;i++) {
+    //   assert(partition_offset[i] == global_partition_offset[i]);
+    // }
     #ifdef PRINT_DEBUG_MESSAGES
     if (partition_id==0) {
       for (int i=0;i<partitions;i++) {
@@ -869,7 +920,7 @@ public:
       }
     }
     #endif
-    delete [] global_partition_offset;
+    // delete [] global_partition_offset;
     {
       // NUMA-aware sub-chunking
       local_partition_offset = new VertexId [sockets + 1];
@@ -935,40 +986,58 @@ public:
       outgoing_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
     }
     {
-      std::thread recv_thread_dst([&](){
-        int finished_count = 0;
-        MPI_Status recv_status;
-        while (finished_count < partitions) {
-          MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
-          int i = recv_status.MPI_SOURCE;
-          assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
-          int recv_bytes;
-          MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
-          if (recv_bytes==1) {
-            finished_count += 1;
-            char c;
-            MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            continue;
+      // std::thread recv_thread_dst([&]() {
+      //   int finished_count = 0;
+      //   MPI_Status recv_status;
+      //   while (finished_count < partitions) {
+      //     MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
+      //     int i = recv_status.MPI_SOURCE;
+      //     assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
+      //     int recv_bytes;
+      //     MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
+      //     if (recv_bytes==1) {
+      //       finished_count += 1;
+      //       char c;
+      //       MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //       continue;
+      //     }
+      //     assert(recv_bytes % edge_unit_size == 0);
+      //     int recv_edges = recv_bytes / edge_unit_size;
+      //     MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //     // #pragma omp parallel for
+      //     for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
+      //       VertexId src = recv_buffer[e_i].src;
+      //       VertexId dst = recv_buffer[e_i].dst;
+      //       assert(dst >= partition_offset[partition_id] && dst < partition_offset[partition_id+1]);
+      //       int dst_part = get_local_partition_id(dst);
+      //       if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
+      //         outgoing_adj_bitmap[dst_part]->set_bit(src);
+      //         outgoing_adj_index[dst_part][src] = 0;
+      //       }
+      //       __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+      //       __sync_fetch_and_add(&in_degree[dst], 1);
+      //     }
+      //     recv_outgoing_edges += recv_edges;
+      //   }
+      // });
+      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
+                                         int recv_edges) {
+        #pragma omp parallel for
+        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(dst >= partition_offset[partition_id] &&
+                 dst < partition_offset[partition_id + 1]);
+          int dst_part = get_local_partition_id(dst);
+          if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
+            outgoing_adj_bitmap[dst_part]->set_bit(src);
+            outgoing_adj_index[dst_part][src] = 0;
           }
-          assert(recv_bytes % edge_unit_size == 0);
-          int recv_edges = recv_bytes / edge_unit_size;
-          MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-          // #pragma omp parallel for
-          for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
-            VertexId src = recv_buffer[e_i].src;
-            VertexId dst = recv_buffer[e_i].dst;
-            assert(dst >= partition_offset[partition_id] && dst < partition_offset[partition_id+1]);
-            int dst_part = get_local_partition_id(dst);
-            if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
-              outgoing_adj_bitmap[dst_part]->set_bit(src);
-              outgoing_adj_index[dst_part][src] = 0;
-            }
-            __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
-            __sync_fetch_and_add(&in_degree[dst], 1);
-          }
-          recv_outgoing_edges += recv_edges;
+          __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+          __sync_fetch_and_add(&in_degree[dst], 1);
         }
-      });
+        recv_outgoing_edges += recv_edges;
+      };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
       }
@@ -990,21 +1059,25 @@ public:
           memcpy(send_buffer[i].data() + edge_unit_size * buffered_edges[i], &read_edge_buffer[e_i], edge_unit_size);
           buffered_edges[i] += 1;
           if (buffered_edges[i] == CHUNKSIZE) {
-            MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            deal_with_shuffle_graph(
+                (EdgeUnit<EdgeData> *)send_buffer[i].data(), buffered_edges[i]);
             buffered_edges[i] = 0;
           }
         }
       }
       for (int i=0;i<partitions;i++) {
         if (buffered_edges[i]==0) continue;
-        MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        deal_with_shuffle_graph(
+            (EdgeUnit<EdgeData> *)send_buffer[i].data(), buffered_edges[i]);
         buffered_edges[i] = 0;
       }
-      for (int i=0;i<partitions;i++) {
-        char c = 0;
-        MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
-      }
-      recv_thread_dst.join();
+      // for (int i=0;i<partitions;i++) {
+      //   char c = 0;
+      //   MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+      // }
+      // recv_thread_dst.join();
       #ifdef PRINT_DEBUG_MESSAGES
       printf("machine(%d) got %lu sparse mode edges\n", partition_id, recv_outgoing_edges);
       #endif
@@ -1044,38 +1117,56 @@ public:
       outgoing_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * outgoing_edges[s_i]);
     }
     {
-      std::thread recv_thread_dst([&](){
-        int finished_count = 0;
-        MPI_Status recv_status;
-        while (finished_count < partitions) {
-          MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
-          int i = recv_status.MPI_SOURCE;
-          assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
-          int recv_bytes;
-          MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
-          if (recv_bytes==1) {
-            finished_count += 1;
-            char c;
-            MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            continue;
-          }
-          assert(recv_bytes % edge_unit_size == 0);
-          int recv_edges = recv_bytes / edge_unit_size;
-          MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-          #pragma omp parallel for
-          for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
-            VertexId src = recv_buffer[e_i].src;
-            VertexId dst = recv_buffer[e_i].dst;
-            assert(dst >= partition_offset[partition_id] && dst < partition_offset[partition_id+1]);
-            int dst_part = get_local_partition_id(dst);
-            EdgeId pos = __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
-            outgoing_adj_list[dst_part][pos].neighbour = dst;
-            if (!std::is_same<EdgeData, Empty>::value) {
-              outgoing_adj_list[dst_part][pos].edge_data = recv_buffer[e_i].edge_data;
-            }
+//       std::thread recv_thread_dst([&]() {
+//         int finished_count = 0;
+//         MPI_Status recv_status;
+//         while (finished_count < partitions) {
+//           MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
+//           int i = recv_status.MPI_SOURCE;
+//           assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
+//           int recv_bytes;
+//           MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
+//           if (recv_bytes==1) {
+//             finished_count += 1;
+//             char c;
+//             MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+//             continue;
+//           }
+//           assert(recv_bytes % edge_unit_size == 0);
+//           int recv_edges = recv_bytes / edge_unit_size;
+//           MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+// #pragma omp parallel for
+//           for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
+//             VertexId src = recv_buffer[e_i].src;
+//             VertexId dst = recv_buffer[e_i].dst;
+//             assert(dst >= partition_offset[partition_id] && dst < partition_offset[partition_id+1]);
+//             int dst_part = get_local_partition_id(dst);
+//             EdgeId pos = __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+//             outgoing_adj_list[dst_part][pos].neighbour = dst;
+//             if (!std::is_same<EdgeData, Empty>::value) {
+//               outgoing_adj_list[dst_part][pos].edge_data = recv_buffer[e_i].edge_data;
+//             }
+//           }
+//         }
+//       });
+      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
+                                         int recv_edges) {
+        #pragma omp parallel for
+        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(dst >= partition_offset[partition_id] &&
+                 dst < partition_offset[partition_id + 1]);
+          int dst_part = get_local_partition_id(dst);
+          EdgeId pos =
+              __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+          outgoing_adj_list[dst_part][pos].neighbour = dst;
+          if (!std::is_same<EdgeData, Empty>::value) {
+            outgoing_adj_list[dst_part][pos].edge_data =
+                recv_buffer[e_i].edge_data;
           }
         }
-      });
+      };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
       }
@@ -1097,21 +1188,24 @@ public:
           memcpy(send_buffer[i].data() + edge_unit_size * buffered_edges[i], &read_edge_buffer[e_i], edge_unit_size);
           buffered_edges[i] += 1;
           if (buffered_edges[i] == CHUNKSIZE) {
-            MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            deal_with_shuffle_graph((EdgeUnit<EdgeData> *)send_buffer[i].data(), buffered_edges[i]);
             buffered_edges[i] = 0;
           }
         }
       }
       for (int i=0;i<partitions;i++) {
         if (buffered_edges[i]==0) continue;
-        MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        deal_with_shuffle_graph((EdgeUnit<EdgeData> *)send_buffer[i].data(),
+                                buffered_edges[i]);
         buffered_edges[i] = 0;
       }
-      for (int i=0;i<partitions;i++) {
-        char c = 0;
-        MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
-      }
-      recv_thread_dst.join();
+      // for (int i=0;i<partitions;i++) {
+      //   char c = 0;
+      //   MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+      // }
+      // recv_thread_dst.join();
     }
     for (int s_i=0;s_i<sockets;s_i++) {
       for (VertexId p_v_i=0;p_v_i<compressed_outgoing_adj_vertices[s_i];p_v_i++) {
@@ -1120,7 +1214,7 @@ public:
         outgoing_adj_index[s_i][v_i+1] = compressed_outgoing_adj_index[s_i][p_v_i+1].index;
       }
     }
-    MPI_Barrier(MPI_COMM_WORLD);
+    // MPI_Barrier(MPI_COMM_WORLD);
 
     EdgeId recv_incoming_edges = 0;
     incoming_edges = new EdgeId [sockets];
@@ -1133,39 +1227,55 @@ public:
       incoming_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
     }
     {
-      std::thread recv_thread_src([&](){
-        int finished_count = 0;
-        MPI_Status recv_status;
-        while (finished_count < partitions) {
-          MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
-          int i = recv_status.MPI_SOURCE;
-          assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
-          int recv_bytes;
-          MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
-          if (recv_bytes==1) {
-            finished_count += 1;
-            char c;
-            MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            continue;
+      // std::thread recv_thread_src([&]() {
+      //   int finished_count = 0;
+      //   MPI_Status recv_status;
+      //   while (finished_count < partitions) {
+      //     MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
+      //     int i = recv_status.MPI_SOURCE;
+      //     assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
+      //     int recv_bytes;
+      //     MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
+      //     if (recv_bytes==1) {
+      //       finished_count += 1;
+      //       char c;
+      //       MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //       continue;
+      //     }
+      //     assert(recv_bytes % edge_unit_size == 0);
+      //     int recv_edges = recv_bytes / edge_unit_size;
+      //     MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //     // #pragma omp parallel for
+      //     for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
+      //       VertexId src = recv_buffer[e_i].src;
+      //       VertexId dst = recv_buffer[e_i].dst;
+      //       assert(src >= partition_offset[partition_id] && src < partition_offset[partition_id+1]);
+      //       int src_part = get_local_partition_id(src);
+      //       if (!incoming_adj_bitmap[src_part]->get_bit(dst)) {
+      //         incoming_adj_bitmap[src_part]->set_bit(dst);
+      //         incoming_adj_index[src_part][dst] = 0;
+      //       }
+      //       __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
+      //     }
+      //     recv_incoming_edges += recv_edges;
+      //   }
+      // });
+      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
+                                         int recv_edges) {
+        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(src >= partition_offset[partition_id] &&
+                 src < partition_offset[partition_id + 1]);
+          int src_part = get_local_partition_id(src);
+          if (!incoming_adj_bitmap[src_part]->get_bit(dst)) {
+            incoming_adj_bitmap[src_part]->set_bit(dst);
+            incoming_adj_index[src_part][dst] = 0;
           }
-          assert(recv_bytes % edge_unit_size == 0);
-          int recv_edges = recv_bytes / edge_unit_size;
-          MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-          // #pragma omp parallel for
-          for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
-            VertexId src = recv_buffer[e_i].src;
-            VertexId dst = recv_buffer[e_i].dst;
-            assert(src >= partition_offset[partition_id] && src < partition_offset[partition_id+1]);
-            int src_part = get_local_partition_id(src);
-            if (!incoming_adj_bitmap[src_part]->get_bit(dst)) {
-              incoming_adj_bitmap[src_part]->set_bit(dst);
-              incoming_adj_index[src_part][dst] = 0;
-            }
-            __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
-          }
-          recv_incoming_edges += recv_edges;
+          __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
         }
-      });
+        recv_incoming_edges += recv_edges;
+      };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
       }
@@ -1187,21 +1297,25 @@ public:
           memcpy(send_buffer[i].data() + edge_unit_size * buffered_edges[i], &read_edge_buffer[e_i], edge_unit_size);
           buffered_edges[i] += 1;
           if (buffered_edges[i] == CHUNKSIZE) {
-            MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            deal_with_shuffle_graph((EdgeUnit<EdgeData> *)send_buffer[i].data(),
+                                    buffered_edges[i]);
             buffered_edges[i] = 0;
           }
         }
       }
       for (int i=0;i<partitions;i++) {
         if (buffered_edges[i]==0) continue;
-        MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        deal_with_shuffle_graph((EdgeUnit<EdgeData> *)send_buffer[i].data(),
+                                buffered_edges[i]);
         buffered_edges[i] = 0;
       }
-      for (int i=0;i<partitions;i++) {
-        char c = 0;
-        MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
-      }
-      recv_thread_src.join();
+      // for (int i=0;i<partitions;i++) {
+      //   char c = 0;
+      //   MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+      // }
+      // recv_thread_src.join();
       #ifdef PRINT_DEBUG_MESSAGES
       printf("machine(%d) got %lu dense mode edges\n", partition_id, recv_incoming_edges);
       #endif
@@ -1241,38 +1355,56 @@ public:
       incoming_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * incoming_edges[s_i]);
     }
     {
-      std::thread recv_thread_src([&](){
-        int finished_count = 0;
-        MPI_Status recv_status;
-        while (finished_count < partitions) {
-          MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
-          int i = recv_status.MPI_SOURCE;
-          assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
-          int recv_bytes;
-          MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
-          if (recv_bytes==1) {
-            finished_count += 1;
-            char c;
-            MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            continue;
-          }
-          assert(recv_bytes % edge_unit_size == 0);
-          int recv_edges = recv_bytes / edge_unit_size;
-          MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-          #pragma omp parallel for
-          for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
-            VertexId src = recv_buffer[e_i].src;
-            VertexId dst = recv_buffer[e_i].dst;
-            assert(src >= partition_offset[partition_id] && src < partition_offset[partition_id+1]);
-            int src_part = get_local_partition_id(src);
-            EdgeId pos = __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
-            incoming_adj_list[src_part][pos].neighbour = src;
-            if (!std::is_same<EdgeData, Empty>::value) {
-              incoming_adj_list[src_part][pos].edge_data = recv_buffer[e_i].edge_data;
-            }
+//       std::thread recv_thread_src([&]() {
+//         int finished_count = 0;
+//         MPI_Status recv_status;
+//         while (finished_count < partitions) {
+//           MPI_Probe(MPI_ANY_SOURCE, ShuffleGraph, MPI_COMM_WORLD, &recv_status);
+//           int i = recv_status.MPI_SOURCE;
+//           assert(recv_status.MPI_TAG == ShuffleGraph && i >=0 && i < partitions);
+//           int recv_bytes;
+//           MPI_Get_count(&recv_status, MPI_CHAR, &recv_bytes);
+//           if (recv_bytes==1) {
+//             finished_count += 1;
+//             char c;
+//             MPI_Recv(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+//             continue;
+//           }
+//           assert(recv_bytes % edge_unit_size == 0);
+//           int recv_edges = recv_bytes / edge_unit_size;
+//           MPI_Recv(recv_buffer, edge_unit_size * recv_edges, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+// #pragma omp parallel for
+//           for (EdgeId e_i=0;e_i<recv_edges;e_i++) {
+//             VertexId src = recv_buffer[e_i].src;
+//             VertexId dst = recv_buffer[e_i].dst;
+//             assert(src >= partition_offset[partition_id] && src < partition_offset[partition_id+1]);
+//             int src_part = get_local_partition_id(src);
+//             EdgeId pos = __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
+//             incoming_adj_list[src_part][pos].neighbour = src;
+//             if (!std::is_same<EdgeData, Empty>::value) {
+//               incoming_adj_list[src_part][pos].edge_data = recv_buffer[e_i].edge_data;
+//             }
+//           }
+//         }
+//       });
+      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
+                                         int recv_edges) {
+        #pragma omp parallel for
+        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(src >= partition_offset[partition_id] &&
+                 src < partition_offset[partition_id + 1]);
+          int src_part = get_local_partition_id(src);
+          EdgeId pos =
+              __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
+          incoming_adj_list[src_part][pos].neighbour = src;
+          if (!std::is_same<EdgeData, Empty>::value) {
+            incoming_adj_list[src_part][pos].edge_data =
+                recv_buffer[e_i].edge_data;
           }
         }
-      });
+      };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
       }
@@ -1294,21 +1426,24 @@ public:
           memcpy(send_buffer[i].data() + edge_unit_size * buffered_edges[i], &read_edge_buffer[e_i], edge_unit_size);
           buffered_edges[i] += 1;
           if (buffered_edges[i] == CHUNKSIZE) {
-            MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+            deal_with_shuffle_graph((EdgeUnit<EdgeData> *)send_buffer[i].data(), buffered_edges[i]);
             buffered_edges[i] = 0;
           }
         }
       }
       for (int i=0;i<partitions;i++) {
         if (buffered_edges[i]==0) continue;
-        MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        // MPI_Send(send_buffer[i].data(), edge_unit_size * buffered_edges[i], MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+        deal_with_shuffle_graph((EdgeUnit<EdgeData> *)send_buffer[i].data(),
+                                buffered_edges[i]);
         buffered_edges[i] = 0;
       }
-      for (int i=0;i<partitions;i++) {
-        char c = 0;
-        MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
-      }
-      recv_thread_src.join();
+      // for (int i=0;i<partitions;i++) {
+      //   char c = 0;
+      //   MPI_Send(&c, 1, MPI_CHAR, i, ShuffleGraph, MPI_COMM_WORLD);
+      // }
+      // recv_thread_src.join();
     }
     for (int s_i=0;s_i<sockets;s_i++) {
       for (VertexId p_v_i=0;p_v_i<compressed_incoming_adj_vertices[s_i];p_v_i++) {
@@ -1317,7 +1452,7 @@ public:
         incoming_adj_index[s_i][v_i+1] = compressed_incoming_adj_index[s_i][p_v_i+1].index;
       }
     }
-    MPI_Barrier(MPI_COMM_WORLD);
+    // MPI_Barrier(MPI_COMM_WORLD);
 
     delete [] buffered_edges;
     delete [] send_buffer;
@@ -1330,7 +1465,7 @@ public:
     transpose();
     tune_chunks();
 
-    prep_time += MPI_Wtime();
+    prep_time += WTime();
 
     #ifdef PRINT_DEBUG_MESSAGES
     if (partition_id==0) {
@@ -1408,7 +1543,7 @@ public:
   template<typename R>
   R process_vertices(std::function<R(VertexId)> process, Bitmap * active) {
     double stream_time = 0;
-    stream_time -= MPI_Wtime();
+    stream_time -= WTime();
 
     R reducer = 0;
     size_t basic_chunk = 64;
@@ -1458,9 +1593,10 @@ public:
       reducer += local_reducer;
     }
     R global_reducer;
-    MPI_Datatype dt = get_mpi_data_type<R>();
-    MPI_Allreduce(&reducer, &global_reducer, 1, dt, MPI_SUM, MPI_COMM_WORLD);
-    stream_time += MPI_Wtime();
+    // MPI_Datatype dt = get_mpi_data_type<R>();
+    // MPI_Allreduce(&reducer, &global_reducer, 1, dt, MPI_SUM, MPI_COMM_WORLD);
+    global_reducer = reducer;
+    stream_time += WTime();
     #ifdef PRINT_DEBUG_MESSAGES
     if (partition_id==0) {
       printf("process_vertices took %lf (s)\n", stream_time);
@@ -1494,7 +1630,7 @@ public:
   template<typename R, typename M>
   R process_edges(std::function<void(VertexId)> sparse_signal, std::function<R(VertexId, M, VertexAdjList<EdgeData>)> sparse_slot, std::function<void(VertexId, VertexAdjList<EdgeData>)> dense_signal, std::function<R(VertexId, M)> dense_slot, Bitmap * active, Bitmap * dense_selective = nullptr) {
     double stream_time = 0;
-    stream_time -= MPI_Wtime();
+    stream_time -= WTime();
 
     for (int t_i=0;t_i<threads;t_i++) {
       local_send_buffer[t_i]->resize( sizeof(MsgUnit<M>) * local_send_buffer_limit );
@@ -1559,30 +1695,30 @@ public:
       recv_queue_mutex.lock();
       recv_queue_size += 1;
       recv_queue_mutex.unlock();
-      std::thread send_thread([&](){
-        for (int step=1;step<partitions;step++) {
-          int i = (partition_id - step + partitions) % partitions;
-          for (int s_i=0;s_i<sockets;s_i++) {
-            MPI_Send(send_buffer[partition_id][s_i]->data, sizeof(MsgUnit<M>) * send_buffer[partition_id][s_i]->count, MPI_CHAR, i, PassMessage, MPI_COMM_WORLD);
-          }
-        }
-      });
-      std::thread recv_thread([&](){
-        for (int step=1;step<partitions;step++) {
-          int i = (partition_id + step) % partitions;
-          for (int s_i=0;s_i<sockets;s_i++) {
-            MPI_Status recv_status;
-            MPI_Probe(i, PassMessage, MPI_COMM_WORLD, &recv_status);
-            MPI_Get_count(&recv_status, MPI_CHAR, &recv_buffer[i][s_i]->count);
-            MPI_Recv(recv_buffer[i][s_i]->data, recv_buffer[i][s_i]->count, MPI_CHAR, i, PassMessage, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            recv_buffer[i][s_i]->count /= sizeof(MsgUnit<M>);
-          }
-          recv_queue[recv_queue_size] = i;
-          recv_queue_mutex.lock();
-          recv_queue_size += 1;
-          recv_queue_mutex.unlock();
-        }
-      });
+      // std::thread send_thread([&](){
+      //   for (int step=1;step<partitions;step++) {
+      //     int i = (partition_id - step + partitions) % partitions;
+      //     for (int s_i=0;s_i<sockets;s_i++) {
+      //       MPI_Send(send_buffer[partition_id][s_i]->data, sizeof(MsgUnit<M>) * send_buffer[partition_id][s_i]->count, MPI_CHAR, i, PassMessage, MPI_COMM_WORLD);
+      //     }
+      //   }
+      // });
+      // std::thread recv_thread([&](){
+      //   for (int step=1;step<partitions;step++) {
+      //     int i = (partition_id + step) % partitions;
+      //     for (int s_i=0;s_i<sockets;s_i++) {
+      //       MPI_Status recv_status;
+      //       MPI_Probe(i, PassMessage, MPI_COMM_WORLD, &recv_status);
+      //       MPI_Get_count(&recv_status, MPI_CHAR, &recv_buffer[i][s_i]->count);
+      //       MPI_Recv(recv_buffer[i][s_i]->data, recv_buffer[i][s_i]->count, MPI_CHAR, i, PassMessage, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //       recv_buffer[i][s_i]->count /= sizeof(MsgUnit<M>);
+      //     }
+      //     recv_queue[recv_queue_size] = i;
+      //     recv_queue_mutex.lock();
+      //     recv_queue_size += 1;
+      //     recv_queue_mutex.unlock();
+      //   }
+      // });
       for (int step=0;step<partitions;step++) {
         while (true) {
           recv_queue_mutex.lock();
@@ -1659,29 +1795,29 @@ public:
           }
         }
       }
-      send_thread.join();
-      recv_thread.join();
+      // send_thread.join();
+      // recv_thread.join();
       delete [] recv_queue;
     } else {
       // dense selective bitmap
       if (dense_selective!=nullptr && partitions>1) {
         double sync_time = 0;
         sync_time -= get_time();
-        std::thread send_thread([&](){
-          for (int step=1;step<partitions;step++) {
-            int recipient_id = (partition_id + step) % partitions;
-            MPI_Send(dense_selective->data + WORD_OFFSET(partition_offset[partition_id]), owned_vertices / 64, MPI_UNSIGNED_LONG, recipient_id, PassMessage, MPI_COMM_WORLD);
-          }
-        });
-        std::thread recv_thread([&](){
-          for (int step=1;step<partitions;step++) {
-            int sender_id = (partition_id - step + partitions) % partitions;
-            MPI_Recv(dense_selective->data + WORD_OFFSET(partition_offset[sender_id]), (partition_offset[sender_id + 1] - partition_offset[sender_id]) / 64, MPI_UNSIGNED_LONG, sender_id, PassMessage, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-          }
-        });
-        send_thread.join();
-        recv_thread.join();
-        MPI_Barrier(MPI_COMM_WORLD);
+        // std::thread send_thread([&](){
+        //   for (int step=1;step<partitions;step++) {
+        //     int recipient_id = (partition_id + step) % partitions;
+        //     MPI_Send(dense_selective->data + WORD_OFFSET(partition_offset[partition_id]), owned_vertices / 64, MPI_UNSIGNED_LONG, recipient_id, PassMessage, MPI_COMM_WORLD);
+        //   }
+        // });
+        // std::thread recv_thread([&](){
+        //   for (int step=1;step<partitions;step++) {
+        //     int sender_id = (partition_id - step + partitions) % partitions;
+        //     MPI_Recv(dense_selective->data + WORD_OFFSET(partition_offset[sender_id]), (partition_offset[sender_id + 1] - partition_offset[sender_id]) / 64, MPI_UNSIGNED_LONG, sender_id, PassMessage, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        //   }
+        // });
+        // send_thread.join();
+        // recv_thread.join();
+        // MPI_Barrier(MPI_COMM_WORLD);
         sync_time += get_time();
         #ifdef PRINT_DEBUG_MESSAGES
         if (partition_id==0) {
@@ -1701,51 +1837,51 @@ public:
       std::mutex send_queue_mutex;
       std::mutex recv_queue_mutex;
 
-      std::thread send_thread([&](){
-        for (int step=0;step<partitions;step++) {
-          if (step==partitions-1) {
-            break;
-          }
-          while (true) {
-            send_queue_mutex.lock();
-            bool condition = (send_queue_size<=step);
-            send_queue_mutex.unlock();
-            if (!condition) break;
-            __asm volatile ("pause" ::: "memory");
-          }
-          int i = send_queue[step];
-          for (int s_i=0;s_i<sockets;s_i++) {
-            MPI_Send(send_buffer[i][s_i]->data, sizeof(MsgUnit<M>) * send_buffer[i][s_i]->count, MPI_CHAR, i, PassMessage, MPI_COMM_WORLD);
-          }
-        }
-      });
-      std::thread recv_thread([&](){
-        std::vector<std::thread> threads;
-        for (int step=1;step<partitions;step++) {
-          int i = (partition_id - step + partitions) % partitions;
-          threads.emplace_back([&](int i){
-            for (int s_i=0;s_i<sockets;s_i++) {
-              MPI_Status recv_status;
-              MPI_Probe(i, PassMessage, MPI_COMM_WORLD, &recv_status);
-              MPI_Get_count(&recv_status, MPI_CHAR, &recv_buffer[i][s_i]->count);
-              MPI_Recv(recv_buffer[i][s_i]->data, recv_buffer[i][s_i]->count, MPI_CHAR, i, PassMessage, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-              recv_buffer[i][s_i]->count /= sizeof(MsgUnit<M>);
-            }
-          }, i);
-        }
-        for (int step=1;step<partitions;step++) {
-          int i = (partition_id - step + partitions) % partitions;
-          threads[step-1].join();
-          recv_queue[recv_queue_size] = i;
-          recv_queue_mutex.lock();
-          recv_queue_size += 1;
-          recv_queue_mutex.unlock();
-        }
-        recv_queue[recv_queue_size] = partition_id;
-        recv_queue_mutex.lock();
-        recv_queue_size += 1;
-        recv_queue_mutex.unlock();
-      });
+      // std::thread send_thread([&](){
+      //   for (int step=0;step<partitions;step++) {
+      //     if (step==partitions-1) {
+      //       break;
+      //     }
+      //     while (true) {
+      //       send_queue_mutex.lock();
+      //       bool condition = (send_queue_size<=step);
+      //       send_queue_mutex.unlock();
+      //       if (!condition) break;
+      //       __asm volatile ("pause" ::: "memory");
+      //     }
+      //     int i = send_queue[step];
+      //     for (int s_i=0;s_i<sockets;s_i++) {
+      //       MPI_Send(send_buffer[i][s_i]->data, sizeof(MsgUnit<M>) * send_buffer[i][s_i]->count, MPI_CHAR, i, PassMessage, MPI_COMM_WORLD);
+      //     }
+      //   }
+      // });
+      // std::thread recv_thread([&](){
+      //   std::vector<std::thread> threads;
+      //   for (int step=1;step<partitions;step++) {
+      //     int i = (partition_id - step + partitions) % partitions;
+      //     threads.emplace_back([&](int i){
+      //       for (int s_i=0;s_i<sockets;s_i++) {
+      //         MPI_Status recv_status;
+      //         MPI_Probe(i, PassMessage, MPI_COMM_WORLD, &recv_status);
+      //         MPI_Get_count(&recv_status, MPI_CHAR, &recv_buffer[i][s_i]->count);
+      //         MPI_Recv(recv_buffer[i][s_i]->data, recv_buffer[i][s_i]->count, MPI_CHAR, i, PassMessage, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      //         recv_buffer[i][s_i]->count /= sizeof(MsgUnit<M>);
+      //       }
+      //     }, i);
+      //   }
+      //   for (int step=1;step<partitions;step++) {
+      //     int i = (partition_id - step + partitions) % partitions;
+      //     threads[step-1].join();
+      //     recv_queue[recv_queue_size] = i;
+      //     recv_queue_mutex.lock();
+      //     recv_queue_size += 1;
+      //     recv_queue_mutex.unlock();
+      //   }
+      //   recv_queue[recv_queue_size] = partition_id;
+      //   recv_queue_mutex.lock();
+      //   recv_queue_size += 1;
+      //   recv_queue_mutex.unlock();
+      // });
       current_send_part_id = partition_id;
       for (int step=0;step<partitions;step++) {
         current_send_part_id = (current_send_part_id + 1) % partitions;
@@ -1800,13 +1936,13 @@ public:
         }
       }
       for (int step=0;step<partitions;step++) {
-        while (true) {
-          recv_queue_mutex.lock();
-          bool condition = (recv_queue_size<=step);
-          recv_queue_mutex.unlock();
-          if (!condition) break;
-          __asm volatile ("pause" ::: "memory");
-        }
+        // while (true) {
+        //   recv_queue_mutex.lock();
+        //   bool condition = (recv_queue_size<=step);
+        //   recv_queue_mutex.unlock();
+        //   if (!condition) break;
+        //   __asm volatile ("pause" ::: "memory");
+        // }
         int i = recv_queue[step];
         MessageBuffer ** used_buffer;
         if (i==partition_id) {
@@ -1849,16 +1985,17 @@ public:
           reducer += local_reducer;
         }
       }
-      send_thread.join();
-      recv_thread.join();
+      // send_thread.join();
+      // recv_thread.join();
       delete [] send_queue;
       delete [] recv_queue;
     }
 
     R global_reducer;
-    MPI_Datatype dt = get_mpi_data_type<R>();
-    MPI_Allreduce(&reducer, &global_reducer, 1, dt, MPI_SUM, MPI_COMM_WORLD);
-    stream_time += MPI_Wtime();
+    // MPI_Datatype dt = get_mpi_data_type<R>();
+    // MPI_Allreduce(&reducer, &global_reducer, 1, dt, MPI_SUM, MPI_COMM_WORLD);
+    global_reducer = reducer;
+    stream_time += WTime();
     #ifdef PRINT_DEBUG_MESSAGES
     if (partition_id==0) {
       printf("process_edges took %lf (s)\n", stream_time);

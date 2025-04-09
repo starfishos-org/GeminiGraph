@@ -109,7 +109,7 @@ void compute(Graph<Empty> * graph) {
 }
 
 int main(int argc, char ** argv) {
-  MPI_Instance mpi(&argc, &argv);
+  // MPI_Instance mpi(&argc, &argv);
 
   if (argc<3) {
     printf("cc [file] [vertices]\n");

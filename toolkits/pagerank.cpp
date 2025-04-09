@@ -129,7 +129,7 @@ void compute(Graph<Empty> * graph, int iterations) {
 }
 
 int main(int argc, char ** argv) {
-  MPI_Instance mpi(&argc, &argv);
+  // MPI_Instance mpi(&argc, &argv);
 
   if (argc<4) {
     printf("pagerank [file] [vertices] [iterations]\n");

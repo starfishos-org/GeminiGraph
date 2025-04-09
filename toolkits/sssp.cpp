@@ -105,7 +105,7 @@ void compute(Graph<Weight> * graph, VertexId root) {
 }
 
 int main(int argc, char ** argv) {
-  MPI_Instance mpi(&argc, &argv);
+  // MPI_Instance mpi(&argc, &argv);
 
   if (argc<4) {
     printf("sssp [file] [vertices] [root]\n");

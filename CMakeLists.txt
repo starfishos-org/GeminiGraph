@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # 设置编译器为 mpicxx
-set(CMAKE_CXX_COMPILER mpicxx)
+# set(CMAKE_CXX_COMPILER mpicxx)
 
 set(CMAKE_BUILD_TYPE Release)
 

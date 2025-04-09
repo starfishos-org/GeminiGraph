@@ -109,7 +109,7 @@ void compute(Graph<Empty> * graph, VertexId root) {
 }
 
 int main(int argc, char ** argv) {
-  MPI_Instance mpi(&argc, &argv);
+  // MPI_Instance mpi(&argc, &argv);
 
   if (argc<4) {
     printf("bfs [file] [vertices] [root]\n");
