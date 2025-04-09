@@ -240,9 +240,9 @@ public:
   }
 
   // deallocate a vertex array
-  template<typename T>
-  T * dealloc_vertex_array(T * array) {
-    free(array);
+  template <typename T> void dealloc_vertex_array(T *array) {
+    // munmap(array, sizeof(T) * vertices);
+    // free(array);
   }
 
   // allocate a numa-oblivious vertex array
@@ -1671,8 +1671,8 @@ public:
       }
       #endif
       int * recv_queue = new int [partitions];
-      int recv_queue_size = 0;
-      std::mutex recv_queue_mutex;
+      // int recv_queue_size = 0;
+      // std::mutex recv_queue_mutex;
 
       current_send_part_id = partition_id;
       #pragma omp parallel for
@@ -1691,10 +1691,10 @@ public:
       for (int t_i=0;t_i<threads;t_i++) {
         flush_local_send_buffer<M>(t_i);
       }
-      recv_queue[recv_queue_size] = partition_id;
-      recv_queue_mutex.lock();
-      recv_queue_size += 1;
-      recv_queue_mutex.unlock();
+      // recv_queue[recv_queue_size] = partition_id;
+      // recv_queue_mutex.lock();
+      // recv_queue_size += 1;
+      // recv_queue_mutex.unlock();
       // std::thread send_thread([&](){
       //   for (int step=1;step<partitions;step++) {
       //     int i = (partition_id - step + partitions) % partitions;
@@ -1720,20 +1720,15 @@ public:
       //   }
       // });
       for (int step=0;step<partitions;step++) {
-        while (true) {
-          recv_queue_mutex.lock();
-          bool condition = (recv_queue_size<=step);
-          recv_queue_mutex.unlock();
-          if (!condition) break;
-          __asm volatile ("pause" ::: "memory");
-        }
-        int i = recv_queue[step];
-        MessageBuffer ** used_buffer;
-        if (i==partition_id) {
-          used_buffer = send_buffer[i];
-        } else {
-          used_buffer = recv_buffer[i];
-        }
+        // while (true) {
+        //   recv_queue_mutex.lock();
+        //   bool condition = (recv_queue_size<=step);
+        //   recv_queue_mutex.unlock();
+        //   if (!condition) break;
+        //   __asm volatile ("pause" ::: "memory");
+        // }
+        MessageBuffer **used_buffer;
+        used_buffer = send_buffer[partition_id];
         for (int s_i=0;s_i<sockets;s_i++) {
           MsgUnit<M> * buffer = (MsgUnit<M> *)used_buffer[s_i]->data;
           size_t buffer_size = used_buffer[s_i]->count;
@@ -1830,12 +1825,6 @@ public:
         printf("dense mode\n");
       }
       #endif
-      int * send_queue = new int [partitions];
-      int * recv_queue = new int [partitions];
-      volatile int send_queue_size = 0;
-      volatile int recv_queue_size = 0;
-      std::mutex send_queue_mutex;
-      std::mutex recv_queue_mutex;
 
       // std::thread send_thread([&](){
       //   for (int step=0;step<partitions;step++) {
@@ -1924,17 +1913,8 @@ public:
             }
           }
         }
-        #pragma omp parallel for
-        for (int t_i=0;t_i<threads;t_i++) {
-          flush_local_send_buffer<M>(t_i);
-        }
-        if (i!=partition_id) {
-          send_queue[send_queue_size] = i;
-          send_queue_mutex.lock();
-          send_queue_size += 1;
-          send_queue_mutex.unlock();
-        }
       }
+      
       for (int step=0;step<partitions;step++) {
         // while (true) {
         //   recv_queue_mutex.lock();
@@ -1943,13 +1923,8 @@ public:
         //   if (!condition) break;
         //   __asm volatile ("pause" ::: "memory");
         // }
-        int i = recv_queue[step];
         MessageBuffer ** used_buffer;
-        if (i==partition_id) {
-          used_buffer = send_buffer[i];
-        } else {
-          used_buffer = recv_buffer[i];
-        }
+        used_buffer = send_buffer[partition_id];
         for (int t_i=0;t_i<threads;t_i++) {
           int s_i = get_socket_id(t_i);
           int s_j = get_socket_offset(t_i);
@@ -1987,8 +1962,8 @@ public:
       }
       // send_thread.join();
       // recv_thread.join();
-      delete [] send_queue;
-      delete [] recv_queue;
+      // delete [] send_queue;
+      // delete [] recv_queue;
     }
 
     R global_reducer;
