@@ -70,11 +70,11 @@ struct MessageBuffer {
   void init (int socket_id) {
     capacity = 4096;
     count = 0;
-    data = (char*)numa_alloc_onnode(capacity, socket_id);
+    data = (char*)malloc(capacity);
   }
   void resize(size_t new_capacity) {
     if (new_capacity > capacity) {
-      char * new_data = (char*)numa_realloc(data, capacity, new_capacity);
+      char * new_data = (char*)realloc(data, new_capacity);
       assert(new_data!=NULL);
       data = new_data;
       capacity = new_capacity;
@@ -142,7 +142,8 @@ public:
 
   Graph() {
     threads = numa_num_configured_cpus();
-    sockets = numa_num_configured_nodes();
+    sockets = 1;
+    // sockets = numa_num_configured_nodes();
     threads_per_socket = threads / sockets;
 
     init();
@@ -161,7 +162,7 @@ public:
     unit_size = sizeof(VertexId) + edge_data_size;
     edge_unit_size = sizeof(VertexId) + unit_size;
 
-    assert( numa_available() != -1 );
+    // assert( numa_available() != -1 );
     assert( sizeof(unsigned long) == 8 ); // assume unsigned long is 64-bit
 
     char nodestring[sockets*2+1];
@@ -170,8 +171,8 @@ public:
       nodestring[s_i*2-1] = ',';
       nodestring[s_i*2] = '0'+s_i;
     }
-    struct bitmask * nodemask = numa_parse_nodestring(nodestring);
-    numa_set_interleave_mask(nodemask);
+    // struct bitmask * nodemask = numa_parse_nodestring(nodestring);
+    // numa_set_interleave_mask(nodemask);
 
     omp_set_dynamic(0);
     omp_set_num_threads(threads);
@@ -179,18 +180,18 @@ public:
     local_send_buffer_limit = 16;
     local_send_buffer = new MessageBuffer * [threads];
     for (int t_i=0;t_i<threads;t_i++) {
-      thread_state[t_i] = (ThreadState*)numa_alloc_onnode( sizeof(ThreadState), get_socket_id(t_i));
-      local_send_buffer[t_i] = (MessageBuffer*)numa_alloc_onnode( sizeof(MessageBuffer), get_socket_id(t_i));
+      thread_state[t_i] = (ThreadState*)malloc( sizeof(ThreadState));
+      local_send_buffer[t_i] = (MessageBuffer*)malloc( sizeof(MessageBuffer));
       local_send_buffer[t_i]->init(get_socket_id(t_i));
     }
-    #pragma omp parallel for
-    for (int t_i=0;t_i<threads;t_i++) {
-      int s_i = get_socket_id(t_i);
-      assert(numa_run_on_node(s_i)==0);
-      #ifdef PRINT_DEBUG_MESSAGES
-      // printf("thread-%d bound to socket-%d\n", t_i, s_i);
-      #endif
-    }
+    // #pragma omp parallel for
+    // for (int t_i=0;t_i<threads;t_i++) {
+    //   int s_i = get_socket_id(t_i);
+    //   assert(numa_run_on_node(s_i)==0);
+    //   #ifdef PRINT_DEBUG_MESSAGES
+    //   printf("thread-%d bound to socket-%d\n", t_i, s_i);
+    //   #endif
+    // }
     #ifdef PRINT_DEBUG_MESSAGES
     // printf("threads=%d*%d\n", sockets, threads_per_socket);
     // printf("interleave on %s\n", nodestring);
@@ -204,9 +205,9 @@ public:
       send_buffer[i] = new MessageBuffer * [sockets];
       recv_buffer[i] = new MessageBuffer * [sockets];
       for (int s_i=0;s_i<sockets;s_i++) {
-        send_buffer[i][s_i] = (MessageBuffer*)numa_alloc_onnode( sizeof(MessageBuffer), s_i);
+        send_buffer[i][s_i] = (MessageBuffer*)malloc( sizeof(MessageBuffer));
         send_buffer[i][s_i]->init(s_i);
-        recv_buffer[i][s_i] = (MessageBuffer*)numa_alloc_onnode( sizeof(MessageBuffer), s_i);
+        recv_buffer[i][s_i] = (MessageBuffer*)malloc( sizeof(MessageBuffer));
         recv_buffer[i][s_i]->init(s_i);
       }
     }
@@ -230,22 +231,22 @@ public:
   T * alloc_vertex_array() {
     char * array = (char *)mmap(NULL, sizeof(T) * vertices, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(array!=NULL);
-    for (int s_i=0;s_i<sockets;s_i++) {
-      numa_tonode_memory(array + sizeof(T) * local_partition_offset[s_i], sizeof(T) * (local_partition_offset[s_i+1] - local_partition_offset[s_i]), s_i);
-    }
+    // for (int s_i=0;s_i<sockets;s_i++) {
+    //   numa_tonode_memory(array + sizeof(T) * local_partition_offset[s_i], sizeof(T) * (local_partition_offset[s_i+1] - local_partition_offset[s_i]), s_i);
+    // }
     return (T*)array;
   }
 
   // deallocate a vertex array
   template<typename T>
   T * dealloc_vertex_array(T * array) {
-    numa_free(array, sizeof(T) * vertices);
+    free(array);
   }
 
   // allocate a numa-oblivious vertex array
   template<typename T>
   T * alloc_interleaved_vertex_array() {
-    T * array = (T *)numa_alloc_interleaved( sizeof(T) * vertices );
+    T * array = (T *)malloc( sizeof(T) * vertices );
     assert(array!=NULL);
     return array;
   }
@@ -489,7 +490,7 @@ public:
     for (VertexId v_i=partition_offset[partition_id];v_i<partition_offset[partition_id+1];v_i++) {
       filtered_out_degree[v_i] = out_degree[v_i];
     }
-    numa_free(out_degree, sizeof(VertexId) * vertices);
+    free(out_degree);
     out_degree = filtered_out_degree;
     in_degree = out_degree;
 
@@ -509,7 +510,7 @@ public:
     for (int s_i=0;s_i<sockets;s_i++) {
       outgoing_adj_bitmap[s_i] = new Bitmap (vertices);
       outgoing_adj_bitmap[s_i]->clear();
-      outgoing_adj_index[s_i] = (EdgeId*)numa_alloc_onnode(sizeof(EdgeId) * (vertices+1), s_i);
+      outgoing_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
     }
     {
       std::thread recv_thread_dst([&](){
@@ -612,7 +613,7 @@ public:
           compressed_outgoing_adj_vertices[s_i] += 1;
         }
       }
-      compressed_outgoing_adj_index[s_i] = (CompressedAdjIndexUnit*)numa_alloc_onnode( sizeof(CompressedAdjIndexUnit) * (compressed_outgoing_adj_vertices[s_i] + 1) , s_i );
+      compressed_outgoing_adj_index[s_i] = (CompressedAdjIndexUnit*)malloc( sizeof(CompressedAdjIndexUnit) * (compressed_outgoing_adj_vertices[s_i] + 1));
       compressed_outgoing_adj_index[s_i][0].index = 0;
       EdgeId last_e_i = 0;
       compressed_outgoing_adj_vertices[s_i] = 0;
@@ -633,7 +634,7 @@ public:
       #ifdef PRINT_DEBUG_MESSAGES
       printf("part(%d) E_%d has %lu symmetric edges\n", partition_id, s_i, outgoing_edges[s_i]);
       #endif
-      outgoing_adj_list[s_i] = (AdjUnit<EdgeData>*)numa_alloc_onnode(unit_size * outgoing_edges[s_i], s_i);
+      outgoing_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * outgoing_edges[s_i]);
     }
     {
       std::thread recv_thread_dst([&](){
@@ -909,7 +910,7 @@ public:
     for (VertexId v_i=partition_offset[partition_id];v_i<partition_offset[partition_id+1];v_i++) {
       filtered_out_degree[v_i] = out_degree[v_i];
     }
-    numa_free(out_degree, sizeof(VertexId) * vertices);
+    free(out_degree);
     out_degree = filtered_out_degree;
     in_degree = alloc_vertex_array<VertexId>();
     for (VertexId v_i=partition_offset[partition_id];v_i<partition_offset[partition_id+1];v_i++) {
@@ -931,7 +932,7 @@ public:
     for (int s_i=0;s_i<sockets;s_i++) {
       outgoing_adj_bitmap[s_i] = new Bitmap (vertices);
       outgoing_adj_bitmap[s_i]->clear();
-      outgoing_adj_index[s_i] = (EdgeId*)numa_alloc_onnode(sizeof(EdgeId) * (vertices+1), s_i);
+      outgoing_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
     }
     {
       std::thread recv_thread_dst([&](){
@@ -1019,7 +1020,7 @@ public:
           compressed_outgoing_adj_vertices[s_i] += 1;
         }
       }
-      compressed_outgoing_adj_index[s_i] = (CompressedAdjIndexUnit*)numa_alloc_onnode( sizeof(CompressedAdjIndexUnit) * (compressed_outgoing_adj_vertices[s_i] + 1) , s_i );
+      compressed_outgoing_adj_index[s_i] = (CompressedAdjIndexUnit*)malloc( sizeof(CompressedAdjIndexUnit) * (compressed_outgoing_adj_vertices[s_i] + 1) );
       compressed_outgoing_adj_index[s_i][0].index = 0;
       EdgeId last_e_i = 0;
       compressed_outgoing_adj_vertices[s_i] = 0;
@@ -1040,7 +1041,7 @@ public:
       #ifdef PRINT_DEBUG_MESSAGES
       printf("part(%d) E_%d has %lu sparse mode edges\n", partition_id, s_i, outgoing_edges[s_i]);
       #endif
-      outgoing_adj_list[s_i] = (AdjUnit<EdgeData>*)numa_alloc_onnode(unit_size * outgoing_edges[s_i], s_i);
+      outgoing_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * outgoing_edges[s_i]);
     }
     {
       std::thread recv_thread_dst([&](){
@@ -1129,7 +1130,7 @@ public:
     for (int s_i=0;s_i<sockets;s_i++) {
       incoming_adj_bitmap[s_i] = new Bitmap (vertices);
       incoming_adj_bitmap[s_i]->clear();
-      incoming_adj_index[s_i] = (EdgeId*)numa_alloc_onnode(sizeof(EdgeId) * (vertices+1), s_i);
+      incoming_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
     }
     {
       std::thread recv_thread_src([&](){
@@ -1216,7 +1217,7 @@ public:
           compressed_incoming_adj_vertices[s_i] += 1;
         }
       }
-      compressed_incoming_adj_index[s_i] = (CompressedAdjIndexUnit*)numa_alloc_onnode( sizeof(CompressedAdjIndexUnit) * (compressed_incoming_adj_vertices[s_i] + 1) , s_i );
+      compressed_incoming_adj_index[s_i] = (CompressedAdjIndexUnit*)malloc( sizeof(CompressedAdjIndexUnit) * (compressed_incoming_adj_vertices[s_i] + 1));
       compressed_incoming_adj_index[s_i][0].index = 0;
       EdgeId last_e_i = 0;
       compressed_incoming_adj_vertices[s_i] = 0;
@@ -1237,7 +1238,7 @@ public:
       #ifdef PRINT_DEBUG_MESSAGES
       printf("part(%d) E_%d has %lu dense mode edges\n", partition_id, s_i, incoming_edges[s_i]);
       #endif
-      incoming_adj_list[s_i] = (AdjUnit<EdgeData>*)numa_alloc_onnode(unit_size * incoming_edges[s_i], s_i);
+      incoming_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * incoming_edges[s_i]);
     }
     {
       std::thread recv_thread_src([&](){
