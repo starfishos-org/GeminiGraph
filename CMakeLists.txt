@@ -14,7 +14,7 @@ set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -g -fopenmp -march=native")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -g -march=native")
 # 如果需要启用宏定义，取消下面行的注释
 # add_definitions(-DPRINT_DEBUG_MESSAGES)
 
@@ -29,5 +29,5 @@ set(TARGETS bc bfs cc pagerank sssp)
 
 # 添加每个工具的可执行文件
 foreach(target ${TARGETS})
-    add_executable(${target} toolkits/${target}.cpp ${HEADERS})
+    add_executable(${target} toolkits/${target}.cpp toolkits/parallel.cpp ${HEADERS})
 endforeach()

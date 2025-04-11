@@ -25,7 +25,7 @@ Copyright (c) 2015-2016 Xiaowei Zhu, Tsinghua University
 #include <malloc.h>
 #include <sys/mman.h>
 #include <thread>
-#include <omp.h>
+// #include <omp.h>
 
 #include <string>
 #include <vector>
@@ -40,6 +40,7 @@ Copyright (c) 2015-2016 Xiaowei Zhu, Tsinghua University
 #include "core/mpi.hpp"
 #include "core/time.hpp"
 #include "core/type.hpp"
+#include "parallel.hpp"
 
 enum ThreadStatus {
   WORKING,
@@ -177,8 +178,8 @@ public:
     // struct bitmask * nodemask = numa_parse_nodestring(nodestring);
     // numa_set_interleave_mask(nodemask);
 
-    omp_set_dynamic(0);
-    omp_set_num_threads(threads);
+    // omp_set_dynamic(0);
+    // omp_set_num_threads(threads);
     thread_state = new ThreadState * [threads];
     local_send_buffer_limit = 16;
     local_send_buffer = new MessageBuffer * [threads];
@@ -221,12 +222,16 @@ public:
   }
 
   // fill a vertex array with a specific value
-  template<typename T>
-  void fill_vertex_array(T * array, T value) {
+  template <typename T> void fill_vertex_array(T *array, T value) {
+#if 0
     #pragma omp parallel for
     for (VertexId v_i=partition_offset[partition_id];v_i<partition_offset[partition_id+1];v_i++) {
       array[v_i] = value;
     }
+#endif
+    Parallel::For([array, value](VertexId v_i) { array[v_i] = value; },
+                  partition_offset[partition_id],
+                  partition_offset[partition_id + 1]);
   }
 
   // allocate a numa-aware vertex array
@@ -701,6 +706,7 @@ public:
       // });
       auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
                                          int recv_edges) {
+#if 0
         #pragma omp parallel for
         for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
           VertexId src = recv_buffer[e_i].src;
@@ -715,6 +721,21 @@ public:
                 recv_buffer[e_i].edge_data;
           }
         }
+#endif
+        auto func = [&](EdgeId e_i) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(dst >= partition_offset[partition_id] &&
+                 dst < partition_offset[partition_id + 1]);
+          int dst_part = get_local_partition_id(dst);
+          EdgeId pos = __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+          outgoing_adj_list[dst_part][pos].neighbour = dst;
+          if (!std::is_same<EdgeData, Empty>::value) {
+            outgoing_adj_list[dst_part][pos].edge_data =
+                recv_buffer[e_i].edge_data;
+          }
+        };
+        Parallel::For(func, 0, recv_edges);
       };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
@@ -865,12 +886,17 @@ public:
       assert(curr_read_bytes>=0);
       read_bytes += curr_read_bytes;
       EdgeId curr_read_edges = curr_read_bytes / edge_unit_size;
-      #pragma omp parallel for
-      for (EdgeId e_i=0;e_i<curr_read_edges;e_i++) {
+      // #pragma omp parallel for
+      // for (EdgeId e_i=0;e_i<curr_read_edges;e_i++) {
+      //   VertexId src = read_edge_buffer[e_i].src;
+      //   VertexId dst = read_edge_buffer[e_i].dst;
+      //   __sync_fetch_and_add(&out_degree[src], 1);
+      // }
+      Parallel::For([&](EdgeId e_i) {
         VertexId src = read_edge_buffer[e_i].src;
         VertexId dst = read_edge_buffer[e_i].dst;
         __sync_fetch_and_add(&out_degree[src], 1);
-      }
+      }, 0, curr_read_edges);
     }
     // MPI_Allreduce(MPI_IN_PLACE, out_degree, vertices, vid_t, MPI_SUM, MPI_COMM_WORLD);
 
@@ -1023,6 +1049,7 @@ public:
       // });
       auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
                                          int recv_edges) {
+#if 0
         #pragma omp parallel for
         for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
           VertexId src = recv_buffer[e_i].src;
@@ -1037,6 +1064,20 @@ public:
           __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
           __sync_fetch_and_add(&in_degree[dst], 1);
         }
+#endif
+        Parallel::For([&](EdgeId e_i) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(dst >= partition_offset[partition_id] &&
+                 dst < partition_offset[partition_id + 1]);
+          int dst_part = get_local_partition_id(dst);
+          if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
+            outgoing_adj_bitmap[dst_part]->set_bit(src);
+            outgoing_adj_index[dst_part][src] = 0;
+          }
+          __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+          __sync_fetch_and_add(&in_degree[dst], 1);
+        }, 0, recv_edges);
         recv_outgoing_edges += recv_edges;
       };
       for (int i=0;i<partitions;i++) {
@@ -1150,8 +1191,9 @@ public:
 //           }
 //         }
 //       });
-      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
-                                         int recv_edges) {
+auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
+                                   int recv_edges) {
+#if 0
         #pragma omp parallel for
         for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
           VertexId src = recv_buffer[e_i].src;
@@ -1167,6 +1209,21 @@ public:
                 recv_buffer[e_i].edge_data;
           }
         }
+#endif
+        Parallel::For([&](EdgeId e_i) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(dst >= partition_offset[partition_id] &&
+                 dst < partition_offset[partition_id + 1]);
+          int dst_part = get_local_partition_id(dst);
+          EdgeId pos =
+              __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
+          outgoing_adj_list[dst_part][pos].neighbour = dst;
+          if (!std::is_same<EdgeData, Empty>::value) {
+            outgoing_adj_list[dst_part][pos].edge_data =
+                recv_buffer[e_i].edge_data;
+          }
+        }, 0, recv_edges);
       };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
@@ -1388,9 +1445,10 @@ public:
 //           }
 //         }
 //       });
-      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
-                                         int recv_edges) {
-        #pragma omp parallel for
+auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
+                                   int recv_edges) {
+#if 0
+#pragma omp parallel for
         for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
           VertexId src = recv_buffer[e_i].src;
           VertexId dst = recv_buffer[e_i].dst;
@@ -1405,6 +1463,21 @@ public:
                 recv_buffer[e_i].edge_data;
           }
         }
+#endif
+        Parallel::For([&](EdgeId e_i) {
+          VertexId src = recv_buffer[e_i].src;
+          VertexId dst = recv_buffer[e_i].dst;
+          assert(src >= partition_offset[partition_id] &&
+                 src < partition_offset[partition_id + 1]);
+          int src_part = get_local_partition_id(src);
+          EdgeId pos =
+              __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
+          incoming_adj_list[src_part][pos].neighbour = src;
+          if (!std::is_same<EdgeData, Empty>::value) {
+            incoming_adj_list[src_part][pos].edge_data =
+                recv_buffer[e_i].edge_data;
+          }
+        }, 0, recv_edges);
       };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
@@ -1559,7 +1632,8 @@ public:
       }
       thread_state[t_i]->status = WORKING;
     }
-    #pragma omp parallel reduction(+:reducer)
+    #if 0
+#pragma omp parallel reduction(+ : reducer)
     {
       R local_reducer = 0;
       int thread_id = omp_get_thread_num();
@@ -1579,10 +1653,9 @@ public:
       for (int t_offset=1;t_offset<threads;t_offset++) {
         int t_i = (thread_id + t_offset) % threads;
         while (thread_state[t_i]->status!=STEALING) {
-          VertexId v_i = __sync_fetch_and_add(&thread_state[t_i]->curr, basic_chunk);
-          if (v_i >= thread_state[t_i]->end) continue;
-          unsigned long word = active->data[WORD_OFFSET(v_i)];
-          while (word != 0) {
+          VertexId v_i = __sync_fetch_and_add(&thread_state[t_i]->curr,
+          basic_chunk); if (v_i >= thread_state[t_i]->end) continue; unsigned
+          long word = active->data[WORD_OFFSET(v_i)]; while (word != 0) {
             if (word & 1) {
               local_reducer += process(v_i);
             }
@@ -1593,6 +1666,48 @@ public:
       }
       reducer += local_reducer;
     }
+#endif
+    auto func = [&](int thread_id) {
+      R local_reducer = 0;
+      while (true) {
+        VertexId v_i =
+            __sync_fetch_and_add(&thread_state[thread_id]->curr, basic_chunk);
+        if (v_i >= thread_state[thread_id]->end)
+          break;
+        unsigned long word = active->data[WORD_OFFSET(v_i)];
+        while (word != 0) {
+          if (word & 1) {
+            local_reducer += process(v_i);
+          }
+          v_i++;
+          word = word >> 1;
+        }
+      }
+      thread_state[thread_id]->status = STEALING;
+      for (int t_offset = 1; t_offset < threads; t_offset++) {
+        int t_i = (thread_id + t_offset) % threads;
+        while (thread_state[t_i]->status != STEALING) {
+          VertexId v_i =
+              __sync_fetch_and_add(&thread_state[t_i]->curr, basic_chunk);
+          if (v_i >= thread_state[t_i]->end)
+            continue;
+          unsigned long word = active->data[WORD_OFFSET(v_i)];
+          while (word != 0) {
+            if (word & 1) {
+              local_reducer += process(v_i);
+            }
+            v_i++;
+            word = word >> 1;
+          }
+        }
+      }
+      return local_reducer;
+    };
+
+    auto rfunc = [](R &a, R &b) { a += b; };
+
+    reducer = Parallel::Reduce<decltype(func),decltype(rfunc), R>(func, rfunc, (R)0, threads);
+
     R global_reducer;
     // MPI_Datatype dt = get_mpi_data_type<R>();
     // MPI_Allreduce(&reducer, &global_reducer, 1, dt, MPI_SUM, MPI_COMM_WORLD);
@@ -1615,9 +1730,8 @@ public:
   }
 
   // emit a message to a vertex's master (dense) / mirror (sparse)
-  template<typename M>
-  void emit(VertexId vtx, M msg) {
-    int t_i = omp_get_thread_num();
+  template <typename M> void emit(VertexId vtx, M msg) {
+    uint32_t t_i = ThreadPool::thread_id;
     MsgUnit<M> * buffer = (MsgUnit<M>*)local_send_buffer[t_i]->data;
     buffer[local_send_buffer[t_i]->count].vertex = vtx;
     buffer[local_send_buffer[t_i]->count].msg_data = msg;
@@ -1676,9 +1790,19 @@ public:
       // std::mutex recv_queue_mutex;
 
       current_send_part_id = partition_id;
-      #pragma omp parallel for
-      for (VertexId begin_v_i=partition_offset[partition_id];begin_v_i<partition_offset[partition_id+1];begin_v_i+=basic_chunk) {
-        VertexId v_i = begin_v_i;
+      // #pragma omp parallel for
+      // for (VertexId begin_v_i=partition_offset[partition_id];begin_v_i<partition_offset[partition_id+1];begin_v_i+=basic_chunk) {
+      //   VertexId v_i = begin_v_i;
+      //   unsigned long word = active->data[WORD_OFFSET(v_i)];
+      //   while (word != 0) {
+      //     if (word & 1) {
+      //       sparse_signal(v_i);
+      //     }
+      //     v_i++;
+      //     word = word >> 1;
+      //   }
+      // }
+      Parallel::For([&](VertexId v_i) {
         unsigned long word = active->data[WORD_OFFSET(v_i)];
         while (word != 0) {
           if (word & 1) {
@@ -1687,11 +1811,14 @@ public:
           v_i++;
           word = word >> 1;
         }
-      }
-      #pragma omp parallel for
-      for (int t_i=0;t_i<threads;t_i++) {
+      }, partition_offset[partition_id], partition_offset[partition_id+1], basic_chunk);
+      // #pragma omp parallel for
+      // for (int t_i=0;t_i<threads;t_i++) {
+      //   flush_local_send_buffer<M>(t_i);
+      // }
+      Parallel::For([&](int t_i) {
         flush_local_send_buffer<M>(t_i);
-      }
+      }, 0, threads);
       // recv_queue[recv_queue_size] = partition_id;
       // recv_queue_mutex.lock();
       // recv_queue_size += 1;
@@ -1744,7 +1871,8 @@ public:
             }
             thread_state[t_i]->status = WORKING;
           }
-          #pragma omp parallel reduction(+:reducer)
+          #if 0
+#pragma omp parallel reduction(+ : reducer)
           {
             R local_reducer = 0;
             int thread_id = omp_get_thread_num();
@@ -1789,6 +1917,53 @@ public:
             }
             reducer += local_reducer;
           }
+#endif
+          auto func = [&](uint32_t thread_id) {
+            R local_reducer = 0;
+            int s_i = get_socket_id(thread_id);
+            while (true) {
+              VertexId b_i = __sync_fetch_and_add(&thread_state[thread_id]->curr, basic_chunk);
+              if (b_i >= thread_state[thread_id]->end) break;
+              VertexId begin_b_i = b_i;
+              VertexId end_b_i = b_i + basic_chunk;
+              if (end_b_i>thread_state[thread_id]->end) {
+                end_b_i = thread_state[thread_id]->end;
+              }
+              for (b_i=begin_b_i;b_i<end_b_i;b_i++) {
+                VertexId v_i = buffer[b_i].vertex;
+                M msg_data = buffer[b_i].msg_data;
+                if (outgoing_adj_bitmap[s_i]->get_bit(v_i)) {
+                  local_reducer += sparse_slot(v_i, msg_data, VertexAdjList<EdgeData>(outgoing_adj_list[s_i] + outgoing_adj_index[s_i][v_i], outgoing_adj_list[s_i] + outgoing_adj_index[s_i][v_i+1]));
+                }
+              }
+            }
+            thread_state[thread_id]->status = STEALING;
+            for (int t_offset=1;t_offset<threads;t_offset++) {
+              int t_i = (thread_id + t_offset) % threads;
+              if (thread_state[t_i]->status==STEALING) continue;
+              while (true) {
+                VertexId b_i = __sync_fetch_and_add(&thread_state[t_i]->curr, basic_chunk);
+                if (b_i >= thread_state[t_i]->end) break;
+                VertexId begin_b_i = b_i;
+                VertexId end_b_i = b_i + basic_chunk;
+                if (end_b_i>thread_state[t_i]->end) {
+                  end_b_i = thread_state[t_i]->end;
+                }
+                int s_i = get_socket_id(t_i);
+                for (b_i=begin_b_i;b_i<end_b_i;b_i++) {
+                  VertexId v_i = buffer[b_i].vertex;
+                  M msg_data = buffer[b_i].msg_data;
+                  if (outgoing_adj_bitmap[s_i]->get_bit(v_i)) {
+                    local_reducer += sparse_slot(v_i, msg_data, VertexAdjList<EdgeData>(outgoing_adj_list[s_i] + outgoing_adj_index[s_i][v_i], outgoing_adj_list[s_i] + outgoing_adj_index[s_i][v_i+1]));
+                  }
+                }
+              }
+            }
+            return local_reducer;
+          };
+          auto rfunc = [](R &a, R &b) { a += b; };
+          reducer = Parallel::Reduce<decltype(func), decltype(rfunc), R>(
+              func, rfunc, (R)0, threads);
         }
       }
       // send_thread.join();
@@ -1879,7 +2054,8 @@ public:
         for (int t_i=0;t_i<threads;t_i++) {
           *thread_state[t_i] = tuned_chunks_dense[i][t_i];
         }
-        #pragma omp parallel
+        #if 0
+#pragma omp parallel
         {
           int thread_id = omp_get_thread_num();
           int s_i = get_socket_id(thread_id);
@@ -1914,6 +2090,43 @@ public:
             }
           }
         }
+#endif
+        {
+          auto func = [this, &dense_signal, basic_chunk](uint32_t thread_id) {
+            int s_i = get_socket_id(thread_id);
+            VertexId final_p_v_i = thread_state[thread_id]->end;
+            while (true) {
+              VertexId begin_p_v_i = __sync_fetch_and_add(&thread_state[thread_id]->curr, basic_chunk);
+              if (begin_p_v_i >= final_p_v_i) break;
+              VertexId end_p_v_i = begin_p_v_i + basic_chunk;
+              if (end_p_v_i > final_p_v_i) {
+                end_p_v_i = final_p_v_i;
+              }
+              for (VertexId p_v_i = begin_p_v_i; p_v_i < end_p_v_i; p_v_i ++) {
+                VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
+                dense_signal(v_i, VertexAdjList<EdgeData>(incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i].index, incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i+1].index));
+              }
+            }
+            thread_state[thread_id]->status = STEALING;
+            for (int t_offset=1;t_offset<threads;t_offset++) {
+              int t_i = (thread_id + t_offset) % threads;
+              int s_i = get_socket_id(t_i);
+              while (thread_state[t_i]->status!=STEALING) {
+                VertexId begin_p_v_i = __sync_fetch_and_add(&thread_state[t_i]->curr, basic_chunk);
+                if (begin_p_v_i >= thread_state[t_i]->end) break;
+                VertexId end_p_v_i = begin_p_v_i + basic_chunk;
+                if (end_p_v_i > thread_state[t_i]->end) {
+                  end_p_v_i = thread_state[t_i]->end;
+                }
+                for (VertexId p_v_i = begin_p_v_i; p_v_i < end_p_v_i; p_v_i ++) {
+                  VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
+                  dense_signal(v_i, VertexAdjList<EdgeData>(incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i].index, incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i+1].index));
+                }
+              }
+            }
+          };
+          Parallel::Invoke(func, threads);
+        }
       }
       
       for (int step=0;step<partitions;step++) {
@@ -1937,7 +2150,8 @@ public:
           }
           thread_state[t_i]->status = WORKING;
         }
-        #pragma omp parallel reduction(+:reducer)
+        #if 0
+#pragma omp parallel reduction(+ : reducer)
         {
           R local_reducer = 0;
           int thread_id = omp_get_thread_num();
@@ -1960,6 +2174,32 @@ public:
           thread_state[thread_id]->status = STEALING;
           reducer += local_reducer;
         }
+#endif
+        auto func = [&](uint32_t thread_id) {
+          R local_reducer = 0;
+          int s_i = get_socket_id(thread_id);
+          MsgUnit<M> * buffer = (MsgUnit<M> *)used_buffer[s_i]->data;
+          while (true) {
+            VertexId b_i = __sync_fetch_and_add(&thread_state[thread_id]->curr, basic_chunk);
+            if (b_i >= thread_state[thread_id]->end)
+              break;
+            VertexId begin_b_i = b_i;
+            VertexId end_b_i = b_i + basic_chunk;
+            if (end_b_i > thread_state[thread_id]->end) {
+              end_b_i = thread_state[thread_id]->end;
+            }
+            for (b_i = begin_b_i; b_i < end_b_i; b_i++) {
+              VertexId v_i = buffer[b_i].vertex;
+              M msg_data = buffer[b_i].msg_data;
+              local_reducer += dense_slot(v_i, msg_data);
+            }
+          }
+          thread_state[thread_id]->status = STEALING;
+          return local_reducer;
+        };
+        auto rfunc = [](R &a, R &b) { a += b; };
+        reducer = Parallel::Reduce<decltype(func), decltype(rfunc), R>(
+            func, rfunc, (R)0, threads);
       }
       // send_thread.join();
       // recv_thread.join();
