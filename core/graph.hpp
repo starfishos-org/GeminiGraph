@@ -61,7 +61,7 @@ struct ThreadState {
 
 struct MessageBuffer {
   size_t capacity;
-  int count; // the actual size (i.e. bytes) should be sizeof(element) * count
+  unsigned count; // the actual size (i.e. bytes) should be sizeof(element) * count
   char * data;
   MessageBuffer () {
     capacity = 0;
