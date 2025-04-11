@@ -16,6 +16,7 @@ Copyright (c) 2015-2016 Xiaowei Zhu, Tsinghua University
 
 #ifndef BITMAP_HPP
 #define BITMAP_HPP
+#include "parallel.hpp"
 
 #define WORD_OFFSET(i) ((i) >> 6)
 #define BIT_OFFSET(i) ((i) & 0x3f)
@@ -34,17 +35,19 @@ public:
   }
   void clear() {
     size_t bm_size = WORD_OFFSET(size);
-    #pragma omp parallel for
-    for (size_t i=0;i<=bm_size;i++) {
-      data[i] = 0;
-    }
+    // #pragma omp parallel for
+    //     for (size_t i=0;i<=bm_size;i++) {
+    //       data[i] = 0;
+    //     }
+    Parallel::For([this](size_t i) { data[i] = 0; }, 0, bm_size+1);
   }
   void fill() {
     size_t bm_size = WORD_OFFSET(size);
-    #pragma omp parallel for
-    for (size_t i=0;i<bm_size;i++) {
-      data[i] = 0xffffffffffffffff;
-    }
+    // #pragma omp parallel for
+    // for (size_t i=0;i<bm_size;i++) {
+    //   data[i] = 0xffffffffffffffff;
+    // }
+    Parallel::For([this](size_t i) { data[i] = 0xffffffffffffffff; }, 0, bm_size);
     data[bm_size] = 0;
     for (size_t i=(bm_size<<6);i<size;i++) {
       data[bm_size] |= 1ul << BIT_OFFSET(i);

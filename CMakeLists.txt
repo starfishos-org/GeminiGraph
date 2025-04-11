@@ -39,7 +39,7 @@ endforeach()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
-if(${OS} STREQUAL "CHCORE")
+if(DEFINED OS AND ${OS} STREQUAL "CHCORE")
     add_custom_target(
         gemini-copy-data
         COMMAND rsync -a ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/pagerank ${build_ramdisk_dir}/
