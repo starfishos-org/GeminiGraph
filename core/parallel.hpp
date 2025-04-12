@@ -8,7 +8,39 @@
 #include <pthread.h>
 #include <queue>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 #include <vector>
+#include <unordered_map>
+#include <cassert>
+#include <string>
+#include "filesystem.hpp"
+
+class MMapPool{
+  static std::unordered_map<std::string, void*> mmap_addr;
+  static std::unordered_map<std::string, int> mmap_fd;
+  public:
+  static void* get_addr(std::string path, size_t offset) {
+    if (mmap_addr.find(path) == mmap_addr.end()) {
+      int fd = open(path.c_str(), O_RDWR);
+      assert(fd != -1);
+      mmap_fd[path] = fd;
+      size_t size = file_size(path);
+      void* addr = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+      assert(addr != MAP_FAILED);
+      mmap_addr[path] = addr;
+    }
+    return (char*)mmap_addr[path] + offset;
+  }
+  static void close_mmap(std::string path) {
+    if (mmap_addr.find(path) != mmap_addr.end()) {
+      munmap(mmap_addr[path], file_size(path));
+      close(mmap_fd[path]);
+      mmap_addr.erase(path);
+      mmap_fd.erase(path);
+    }
+  }
+};
 
 class ThreadPool {
 public:
