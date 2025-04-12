@@ -4,7 +4,6 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
-#include <iostream>
 #include <mutex>
 #include <pthread.h>
 #include <queue>
@@ -67,10 +66,10 @@ private:
   std::atomic<bool> stop;
 
   std::atomic<uint32_t> thread_id_allocator{0};
-  public:
+
+public:
   static thread_local uint32_t thread_id;
 };
-#include <thread>
 
 class Parallel {
   static uint32_t thread_count;
@@ -83,9 +82,6 @@ public:
     std::atomic<int> remaining_tasks(threads);
     std::mutex completion_mutex;
     std::condition_variable completion_condition;
-
-    std::vector<std::thread> thread_pool_l;
-    // std::atomic<int> starter(0);
 
     for (uint32_t i = 0; i < threads; ++i) {
       thread_pool.enqueue([=, &func, &remaining_tasks, &completion_mutex,

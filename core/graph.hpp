@@ -886,12 +886,14 @@ public:
       assert(curr_read_bytes>=0);
       read_bytes += curr_read_bytes;
       EdgeId curr_read_edges = curr_read_bytes / edge_unit_size;
-      // #pragma omp parallel for
-      // for (EdgeId e_i=0;e_i<curr_read_edges;e_i++) {
-      //   VertexId src = read_edge_buffer[e_i].src;
-      //   VertexId dst = read_edge_buffer[e_i].dst;
-      //   __sync_fetch_and_add(&out_degree[src], 1);
-      // }
+      #if 0
+      #pragma omp parallel for
+      for (EdgeId e_i=0;e_i<curr_read_edges;e_i++) {
+        VertexId src = read_edge_buffer[e_i].src;
+        VertexId dst = read_edge_buffer[e_i].dst;
+        __sync_fetch_and_add(&out_degree[src], 1);
+      }
+      #endif
       Parallel::For([&](EdgeId e_i) {
         VertexId src = read_edge_buffer[e_i].src;
         VertexId dst = read_edge_buffer[e_i].dst;
