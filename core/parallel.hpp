@@ -133,7 +133,7 @@ public:
   }
 
   template <typename Func> static void Invoke(Func func, uint32_t threads) {
-    std::atomic<int> remaining_tasks(threads);
+    std::atomic<uint32_t> remaining_tasks(threads);
     std::mutex completion_mutex;
     std::condition_variable completion_condition;
 
@@ -163,7 +163,7 @@ public:
     uint64_t total_chunks =
         ((end - start + incr - 1) / incr + chunk_size - 1) / chunk_size;
 
-    std::atomic<int> remaining_tasks(total_chunks);
+    std::atomic<uint32_t> remaining_tasks(total_chunks);
     std::mutex completion_mutex;
     std::condition_variable completion_condition;
 
