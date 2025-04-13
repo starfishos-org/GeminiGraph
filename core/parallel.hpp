@@ -4,12 +4,43 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
-#include <iostream>
 #include <mutex>
 #include <pthread.h>
 #include <queue>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 #include <vector>
+#include <unordered_map>
+#include <cassert>
+#include <string>
+#include "filesystem.hpp"
+
+class MMapPool{
+  static std::unordered_map<std::string, void*> mmap_addr;
+  static std::unordered_map<std::string, int> mmap_fd;
+  public:
+  static void* get_addr(std::string path, size_t offset) {
+    if (mmap_addr.find(path) == mmap_addr.end()) {
+      int fd = open(path.c_str(), O_RDWR);
+      assert(fd != -1);
+      mmap_fd[path] = fd;
+      size_t size = file_size(path);
+      void* addr = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+      assert(addr != MAP_FAILED);
+      mmap_addr[path] = addr;
+    }
+    return (char*)mmap_addr[path] + offset;
+  }
+  static void close_mmap(std::string path) {
+    if (mmap_addr.find(path) != mmap_addr.end()) {
+      munmap(mmap_addr[path], file_size(path));
+      close(mmap_fd[path]);
+      mmap_addr.erase(path);
+      mmap_fd.erase(path);
+    }
+  }
+};
 
 class ThreadPool {
 public:
@@ -67,10 +98,10 @@ private:
   std::atomic<bool> stop;
 
   std::atomic<uint32_t> thread_id_allocator{0};
-  public:
+
+public:
   static thread_local uint32_t thread_id;
 };
-#include <thread>
 
 class Parallel {
   static uint32_t thread_count;
@@ -85,9 +116,6 @@ public:
     std::atomic<int> remaining_tasks(threads);
     std::mutex completion_mutex;
     std::condition_variable completion_condition;
-
-    std::vector<std::thread> thread_pool_l;
-    // std::atomic<int> starter(0);
 
     for (uint32_t i = 0; i < threads; ++i) {
       thread_pool.enqueue([=, &func, &remaining_tasks, &completion_mutex,
