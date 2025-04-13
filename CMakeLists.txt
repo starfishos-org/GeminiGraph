@@ -43,7 +43,7 @@ if(DEFINED OS AND ${OS} STREQUAL "CHCORE")
     add_custom_target(
         gemini-copy-data
         COMMAND rsync -a ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/pagerank ${build_ramdisk_dir}/
-        COMMAND rsync -a ${CMAKE_CURRENT_SOURCE_DIR}/cnr-2000.binedgelist ${build_ramdisk_dir}/
+        # COMMAND rsync -a ${CMAKE_CURRENT_SOURCE_DIR}/cnr-2000.binedgelist ${build_ramdisk_dir}/
         DEPENDS ${TARGETS}
     )
     add_dependencies(ramdisk gemini-copy-data)

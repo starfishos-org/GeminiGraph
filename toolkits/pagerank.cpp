@@ -131,8 +131,8 @@ void compute(Graph<Empty> * graph, int iterations) {
 int main(int argc, char ** argv) {
   // MPI_Instance mpi(&argc, &argv);
 
-  if (argc<4) {
-    printf("pagerank [file] [vertices] [iterations]\n");
+  if (argc<5) {
+    printf("pagerank [file] [vertices] [iterations] [threads num]\n");
     exit(-1);
   }
 
@@ -140,6 +140,7 @@ int main(int argc, char ** argv) {
   graph = new Graph<Empty>();
   graph->load_directed(argv[1], std::atoi(argv[2]));
   int iterations = std::atoi(argv[3]);
+  Parallel::SetThreadCount(std::atoi(argv[4]));
 
   compute(graph, iterations);
   for (int run=0;run<5;run++) {

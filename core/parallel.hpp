@@ -79,6 +79,8 @@ class Parallel {
   static const uint64_t min_chunk_size;
 
 public:
+  static void SetThreadCount(uint32_t threads) { thread_count = threads; }
+
   template <typename Func> static void Invoke(Func func, uint32_t threads) {
     std::atomic<int> remaining_tasks(threads);
     std::mutex completion_mutex;
