@@ -15,9 +15,9 @@
 
 class ThreadPool {
 public:
-  ThreadPool() : stop(false) {}
+  ThreadPool() : stop(false), thread_id_allocator(0) {}
 
-  ThreadPool(uint32_t thread_count) : stop(false) {
+  ThreadPool(uint32_t thread_count) : stop(false), thread_id_allocator(0) {
     workers.reserve(thread_count);
     for (uint32_t i = 0; i < thread_count; ++i) {
       pthread_t thread;
@@ -37,11 +37,16 @@ public:
     for (pthread_t &worker : workers) {
       pthread_join(worker, nullptr);
     }
+    thread_id_allocator = 0;
+    workers.clear();
+    while(!tasks.empty()) {
+      tasks.pop();
+    }
+    stop = false;
   }
 
   void set_thread_count(uint32_t thread_count) {
     destroy();
-    stop = false;
     workers.reserve(thread_count);
     for (uint32_t i = 0; i < thread_count; ++i) {
       pthread_t thread;
@@ -59,11 +64,19 @@ public:
   }
 
   void bind_cpu(uint32_t cpu_id) {
+#ifdef OS_CHCORE
     cpu_set_t cpu_set;
     CPU_ZERO(&cpu_set);
     CPU_SET(cpu_id, &cpu_set);
     sched_setaffinity(-2, sizeof(cpu_set), &cpu_set);
     sched_yield();
+#else
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    CPU_SET(cpu_id, &cpu_set);
+    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set), &cpu_set);
+    sched_yield();
+#endif
   }
 
 private:
@@ -92,7 +105,7 @@ private:
   std::condition_variable condition;
   std::atomic<bool> stop;
 
-  std::atomic<uint32_t> thread_id_allocator{0};
+  std::atomic<uint32_t> thread_id_allocator;
 
 public:
   static thread_local uint32_t thread_id;
