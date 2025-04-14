@@ -93,7 +93,7 @@ public:
     cpu_set_t cpu_set;
     CPU_ZERO(&cpu_set);
     CPU_SET(cpu_id, &cpu_set);
-    sched_setaffinity(0, sizeof(cpu_set), &cpu_set);
+    sched_setaffinity(-2, sizeof(cpu_set), &cpu_set);
     sched_yield();
   }
 
