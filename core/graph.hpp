@@ -41,6 +41,7 @@ Copyright (c) 2015-2016 Xiaowei Zhu, Tsinghua University
 #include "core/time.hpp"
 #include "core/type.hpp"
 #include "parallel.hpp"
+#include <unordered_map>
 
 enum ThreadStatus {
   WORKING,
@@ -88,6 +89,32 @@ struct MsgUnit {
   VertexId vertex;
   MsgData msg_data;
 } __attribute__((packed));
+
+class MMapPool{
+  static std::unordered_map<std::string, void*> mmap_addr;
+  static std::unordered_map<std::string, int> mmap_fd;
+  public:
+  static void* get_addr(std::string& path, size_t offset) {
+    if (mmap_addr.find(path) == mmap_addr.end()) {
+      int fd = open(path.c_str(), O_RDWR);
+      assert(fd != -1);
+      mmap_fd[path] = fd;
+      size_t size = file_size(path);
+      void* addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      assert(addr != MAP_FAILED);
+      mmap_addr[path] = addr;
+    }
+    return (char*)mmap_addr[path] + offset;
+  }
+  static void close(std::string& path) {
+    if (mmap_addr.find(path) != mmap_addr.end()) {
+      munmap(mmap_addr[path], file_size(path));
+      close(path);
+      mmap_addr.erase(path);
+      mmap_fd.erase(path);
+    }
+  }
+};
 
 template <typename EdgeData = Empty>
 class Graph {
@@ -313,7 +340,7 @@ public:
     //   offset += bytes;
     // }
     array = MMapPool::get_addr(path, offset);
-    MMapPool::close_mmap(path);
+    MMapPool::close(path);
     // assert(close(fd)==0);
   }
 
@@ -884,12 +911,12 @@ public:
       long curr_read_bytes;
       if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
         // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-        read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+        read_edge_buffer = MMapPool::get_addr(path, offset);
         offset += edge_unit_size * CHUNKSIZE;
         curr_read_bytes = edge_unit_size * CHUNKSIZE;
       } else {
         // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-        read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+        read_edge_buffer = MMapPool::get_addr(path, offset);
         offset += bytes_to_read - read_bytes;
         curr_read_bytes = bytes_to_read - read_bytes;
       }
@@ -1102,12 +1129,12 @@ public:
         long curr_read_bytes;
         if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
           // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-          read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+          read_edge_buffer = MMapPool::get_addr(path, offset);
           offset += edge_unit_size * CHUNKSIZE;
           curr_read_bytes = edge_unit_size * CHUNKSIZE;
         } else {
           // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-          read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+          read_edge_buffer = MMapPool::get_addr(path, offset);
           offset += bytes_to_read - read_bytes;
           curr_read_bytes = bytes_to_read - read_bytes;
         }
@@ -1254,12 +1281,12 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
         long curr_read_bytes;
         if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
           // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-          read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+          read_edge_buffer = MMapPool::get_addr(path, offset);
           offset += edge_unit_size * CHUNKSIZE;
           curr_read_bytes = edge_unit_size * CHUNKSIZE;       
         } else {
           // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-          read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+          read_edge_buffer = MMapPool::get_addr(path, offset);
           offset += bytes_to_read - read_bytes;
           curr_read_bytes = bytes_to_read - read_bytes;          
         }
@@ -1370,12 +1397,12 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
         long curr_read_bytes;
         if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
           // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-          read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+          read_edge_buffer = MMapPool::get_addr(path, offset);
           offset += edge_unit_size * CHUNKSIZE;
           curr_read_bytes = edge_unit_size * CHUNKSIZE;              
         } else {
           // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-          read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+          read_edge_buffer = MMapPool::get_addr(path, offset);
           offset += bytes_to_read - read_bytes;
           curr_read_bytes = bytes_to_read - read_bytes;               
         }
@@ -1522,12 +1549,12 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
         long curr_read_bytes;
         if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
           // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-          read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+          read_edge_buffer = MMapPool::get_addr(path, offset);
           offset += edge_unit_size * CHUNKSIZE;
           curr_read_bytes = edge_unit_size * CHUNKSIZE;             
         } else {
           // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-          read_edge_buffer = (EdgeUnit<EdgeData>*) MMapPool::get_addr(path, offset);
+          read_edge_buffer = MMapPool::get_addr(path, offset);
           offset += bytes_to_read - read_bytes;
           curr_read_bytes = bytes_to_read - read_bytes;             
         }
@@ -1570,10 +1597,9 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
 
     delete [] buffered_edges;
     delete [] send_buffer;
-    // delete [] read_edge_buffer;
+    delete [] read_edge_buffer;
     delete [] recv_buffer;
     // close(fin);
-    // MMapPool::close_mmap(path);
 
     transpose();
     tune_chunks();
