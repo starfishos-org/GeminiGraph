@@ -141,11 +141,11 @@ public:
   MessageBuffer *** send_buffer; // MessageBuffer* [partitions] [sockets]; numa-aware
   MessageBuffer *** recv_buffer; // MessageBuffer* [partitions] [sockets]; numa-aware
 
-  Graph() {
+  Graph(uint32_t thread_count = std::thread::hardware_concurrency()) {
     partition_id = 0;
     partitions = 1;
     // threads = numa_num_configured_cpus();
-    threads = std::thread::hardware_concurrency();
+    threads = thread_count;
     sockets = 1;
     // sockets = numa_num_configured_nodes();
     threads_per_socket = threads / sockets;
@@ -1360,7 +1360,7 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
         }
         recv_incoming_edges += recv_edges;
       };
-      for (int i=0;i<partitions;i++) {
+      for (int i = 0; i < partitions; i++) {
         buffered_edges[i] = 0;
       }
       // assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
@@ -1573,7 +1573,7 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
     // delete [] read_edge_buffer;
     delete [] recv_buffer;
     // close(fin);
-    MMapPool::close_mmap(path);
+    // MMapPool::close_mmap(path);
 
     transpose();
     tune_chunks();

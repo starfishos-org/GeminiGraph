@@ -136,11 +136,14 @@ int main(int argc, char ** argv) {
     exit(-1);
   }
 
-  Graph<Empty> * graph;
-  graph = new Graph<Empty>();
+  Graph<Empty> *graph;
+
+  uint32_t thread_count = std::atoi(argv[4]);
+  Parallel::SetThreadCount(thread_count);
+  
+  graph = new Graph<Empty>(thread_count);
   graph->load_directed(argv[1], std::atoi(argv[2]));
   int iterations = std::atoi(argv[3]);
-  Parallel::SetThreadCount(std::atoi(argv[4]));
 
   compute(graph, iterations);
   for (int run=0;run<5;run++) {

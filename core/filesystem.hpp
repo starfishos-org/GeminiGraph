@@ -17,12 +17,12 @@ Copyright (c) 2015-2016 Xiaowei Zhu, Tsinghua University
 #ifndef FILESYSTEM_HPP
 #define FILESYSTEM_HPP
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <string>
 
 inline bool file_exists(std::string filename) {
   struct stat st;
@@ -31,7 +31,10 @@ inline bool file_exists(std::string filename) {
 
 inline long file_size(std::string filename) {
   struct stat st;
-  assert(stat(filename.c_str(), &st)==0);
+  if (stat(filename.c_str(), &st) != 0) {
+    perror("Error retrieving file size");
+    return -1; // Return -1 to indicate an error
+  }
   return st.st_size;
 }
 

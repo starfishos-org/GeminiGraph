@@ -1,37 +1,39 @@
 #pragma once
+#include "filesystem.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <condition_variable>
 #include <cstdint>
+#include <fcntl.h>
 #include <functional>
 #include <mutex>
 #include <pthread.h>
 #include <queue>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <vector>
-#include <unordered_map>
-#include <cassert>
 #include <string>
-#include "filesystem.hpp"
+#include <sys/mman.h>
+#include <unistd.h>
+#include <unordered_map>
+#include <vector>
 
-class MMapPool{
-  static std::unordered_map<std::string, void*> mmap_addr;
+class MMapPool {
+  static std::unordered_map<std::string, void *> mmap_addr;
   static std::unordered_map<std::string, int> mmap_fd;
-  public:
-  static void* get_addr(std::string path, size_t offset) {
+
+public:
+  static void *get_addr(std::string path, size_t offset) {
     if (mmap_addr.find(path) == mmap_addr.end()) {
-      int fd = open(path.c_str(), O_RDWR);
+      int fd = open(path.c_str(), O_RDONLY);
       assert(fd != -1);
       mmap_fd[path] = fd;
       size_t size = file_size(path);
-      void* addr = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+      void *addr = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
       assert(addr != MAP_FAILED);
       mmap_addr[path] = addr;
     }
-    return (char*)mmap_addr[path] + offset;
+    return (char *)mmap_addr[path] + offset;
   }
+  
   static void close_mmap(std::string path) {
     if (mmap_addr.find(path) != mmap_addr.end()) {
       munmap(mmap_addr[path], file_size(path));
@@ -44,6 +46,8 @@ class MMapPool{
 
 class ThreadPool {
 public:
+  ThreadPool() : stop(false) {}
+
   ThreadPool(uint32_t thread_count) : stop(false) {
     workers.reserve(thread_count);
     for (uint32_t i = 0; i < thread_count; ++i) {
@@ -53,7 +57,9 @@ public:
     }
   }
 
-  ~ThreadPool() {
+  ~ThreadPool() { destroy(); }
+
+  void destroy() {
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
       stop = true;
@@ -61,6 +67,17 @@ public:
     condition.notify_all();
     for (pthread_t &worker : workers) {
       pthread_join(worker, nullptr);
+    }
+  }
+
+  void set_thread_count(uint32_t thread_count) {
+    destroy();
+    stop = false;
+    workers.reserve(thread_count);
+    for (uint32_t i = 0; i < thread_count; ++i) {
+      pthread_t thread;
+      pthread_create(&thread, nullptr, ThreadPool::worker_thread, this);
+      workers.push_back(thread);
     }
   }
 
@@ -110,7 +127,10 @@ class Parallel {
   static const uint64_t min_chunk_size;
 
 public:
-  static void SetThreadCount(uint32_t threads) { thread_count = threads; }
+  static void SetThreadCount(uint32_t threads) {
+    thread_count = threads;
+    thread_pool.set_thread_count(threads);
+  }
 
   template <typename Func> static void Invoke(Func func, uint32_t threads) {
     std::atomic<int> remaining_tasks(threads);
