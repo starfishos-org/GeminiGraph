@@ -41,7 +41,6 @@ Copyright (c) 2015-2016 Xiaowei Zhu, Tsinghua University
 #include "core/time.hpp"
 #include "core/type.hpp"
 #include "parallel.hpp"
-#include <unordered_map>
 
 enum ThreadStatus {
   WORKING,
@@ -89,32 +88,6 @@ struct MsgUnit {
   VertexId vertex;
   MsgData msg_data;
 } __attribute__((packed));
-
-class MMapPool{
-  static std::unordered_map<std::string, void*> mmap_addr;
-  static std::unordered_map<std::string, int> mmap_fd;
-  public:
-  static void* get_addr(std::string& path, size_t offset) {
-    if (mmap_addr.find(path) == mmap_addr.end()) {
-      int fd = open(path.c_str(), O_RDWR);
-      assert(fd != -1);
-      mmap_fd[path] = fd;
-      size_t size = file_size(path);
-      void* addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-      assert(addr != MAP_FAILED);
-      mmap_addr[path] = addr;
-    }
-    return (char*)mmap_addr[path] + offset;
-  }
-  static void close(std::string& path) {
-    if (mmap_addr.find(path) != mmap_addr.end()) {
-      munmap(mmap_addr[path], file_size(path));
-      close(path);
-      mmap_addr.erase(path);
-      mmap_fd.erase(path);
-    }
-  }
-};
 
 template <typename EdgeData = Empty>
 class Graph {
@@ -328,20 +301,18 @@ public:
     if (!file_exists(path) || file_size(path) != file_length) {
       assert(false);
     }
-    // int fd = open(path.c_str(), O_RDWR);
-    // assert(fd!=-1);
+    int fd = open(path.c_str(), O_RDWR);
+    assert(fd!=-1);
     long offset = sizeof(T) * partition_offset[partition_id];
-    // long end_offset = sizeof(T) * partition_offset[partition_id+1];
-    // void * data = (void *)array;
-    // assert(lseek(fd, offset, SEEK_SET)!=-1);
-    // while (offset < end_offset) {
-    //   long bytes = read(fd, data + offset, end_offset - offset);
-    //   assert(bytes!=-1);
-    //   offset += bytes;
-    // }
-    array = MMapPool::get_addr(path, offset);
-    MMapPool::close(path);
-    // assert(close(fd)==0);
+    long end_offset = sizeof(T) * partition_offset[partition_id+1];
+    void * data = (void *)array;
+    assert(lseek(fd, offset, SEEK_SET)!=-1);
+    while (offset < end_offset) {
+      long bytes = read(fd, data + offset, end_offset - offset);
+      assert(bytes!=-1);
+      offset += bytes;
+    }
+    assert(close(fd)==0);
   }
 
   // gather a vertex array
@@ -896,29 +867,21 @@ public:
     long bytes_to_read = edge_unit_size * read_edges;
     long read_offset = edge_unit_size * (edges / partitions * partition_id);
     long read_bytes;
-    // int fin = open(path.c_str(), O_RDONLY);
-    // EdgeUnit<EdgeData> * read_edge_buffer = new EdgeUnit<EdgeData> [CHUNKSIZE];
-    EdgeUnit<EdgeData> * read_edge_buffer;;
+    int fin = open(path.c_str(), O_RDONLY);
+    EdgeUnit<EdgeData> * read_edge_buffer = new EdgeUnit<EdgeData> [CHUNKSIZE];
 
     out_degree = alloc_interleaved_vertex_array<VertexId>();
     for (VertexId v_i=0;v_i<vertices;v_i++) {
       out_degree[v_i] = 0;
     }
-    // assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
-    size_t offset = read_offset;
+    assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
     read_bytes = 0;
     while (read_bytes < bytes_to_read) {
       long curr_read_bytes;
       if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
-        // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-        read_edge_buffer = MMapPool::get_addr(path, offset);
-        offset += edge_unit_size * CHUNKSIZE;
-        curr_read_bytes = edge_unit_size * CHUNKSIZE;
+        curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
       } else {
-        // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-        read_edge_buffer = MMapPool::get_addr(path, offset);
-        offset += bytes_to_read - read_bytes;
-        curr_read_bytes = bytes_to_read - read_bytes;
+        curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
       }
       assert(curr_read_bytes>=0);
       read_bytes += curr_read_bytes;
@@ -1122,21 +1085,14 @@ public:
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
       }
-      // assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
-      offset = read_offset;
+      assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
       read_bytes = 0;
       while (read_bytes < bytes_to_read) {
         long curr_read_bytes;
         if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
-          // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-          read_edge_buffer = MMapPool::get_addr(path, offset);
-          offset += edge_unit_size * CHUNKSIZE;
-          curr_read_bytes = edge_unit_size * CHUNKSIZE;
+          curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
         } else {
-          // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-          read_edge_buffer = MMapPool::get_addr(path, offset);
-          offset += bytes_to_read - read_bytes;
-          curr_read_bytes = bytes_to_read - read_bytes;
+          curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
         }
         assert(curr_read_bytes>=0);
         read_bytes += curr_read_bytes;
@@ -1274,21 +1230,14 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
       }
-      // assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
-      offset = read_offset;
+      assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
       read_bytes = 0;
       while (read_bytes < bytes_to_read) {
         long curr_read_bytes;
         if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
-          // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-          read_edge_buffer = MMapPool::get_addr(path, offset);
-          offset += edge_unit_size * CHUNKSIZE;
-          curr_read_bytes = edge_unit_size * CHUNKSIZE;       
+          curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
         } else {
-          // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-          read_edge_buffer = MMapPool::get_addr(path, offset);
-          offset += bytes_to_read - read_bytes;
-          curr_read_bytes = bytes_to_read - read_bytes;          
+          curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
         }
         assert(curr_read_bytes>=0);
         read_bytes += curr_read_bytes;
@@ -1390,21 +1339,14 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
       for (int i = 0; i < partitions; i++) {
         buffered_edges[i] = 0;
       }
-      // assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
-      offset = read_offset;
+      assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
       read_bytes = 0;
       while (read_bytes < bytes_to_read) {
         long curr_read_bytes;
         if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
-          // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-          read_edge_buffer = MMapPool::get_addr(path, offset);
-          offset += edge_unit_size * CHUNKSIZE;
-          curr_read_bytes = edge_unit_size * CHUNKSIZE;              
+          curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
         } else {
-          // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-          read_edge_buffer = MMapPool::get_addr(path, offset);
-          offset += bytes_to_read - read_bytes;
-          curr_read_bytes = bytes_to_read - read_bytes;               
+          curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
         }
         assert(curr_read_bytes>=0);
         read_bytes += curr_read_bytes;
@@ -1542,21 +1484,14 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
       }
-      // assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
-      offset = read_offset;
+      assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
       read_bytes = 0;
       while (read_bytes < bytes_to_read) {
         long curr_read_bytes;
         if (bytes_to_read - read_bytes > edge_unit_size * CHUNKSIZE) {
-          // curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
-          read_edge_buffer = MMapPool::get_addr(path, offset);
-          offset += edge_unit_size * CHUNKSIZE;
-          curr_read_bytes = edge_unit_size * CHUNKSIZE;             
+          curr_read_bytes = read(fin, read_edge_buffer, edge_unit_size * CHUNKSIZE);
         } else {
-          // curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
-          read_edge_buffer = MMapPool::get_addr(path, offset);
-          offset += bytes_to_read - read_bytes;
-          curr_read_bytes = bytes_to_read - read_bytes;             
+          curr_read_bytes = read(fin, read_edge_buffer, bytes_to_read - read_bytes);
         }
         assert(curr_read_bytes>=0);
         read_bytes += curr_read_bytes;
@@ -1599,7 +1534,7 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
     delete [] send_buffer;
     delete [] read_edge_buffer;
     delete [] recv_buffer;
-    // close(fin);
+    close(fin);
 
     transpose();
     tune_chunks();
