@@ -89,10 +89,19 @@ public:
     condition.notify_one();
   }
 
+  void bind_cpu(uint32_t cpu_id) {
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    CPU_SET(cpu_id, &cpu_set);
+    sched_setaffinity(0, sizeof(cpu_set), &cpu_set);
+    sched_yield();
+  }
+
 private:
   static void *worker_thread(void *arg) {
     auto *pool = static_cast<ThreadPool *>(arg);
     thread_id = pool->thread_id_allocator++;
+    pool->bind_cpu(thread_id);
     while (true) {
       std::function<void()> task;
       {
