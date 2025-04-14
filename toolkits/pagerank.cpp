@@ -16,6 +16,7 @@ Copyright (c) 2014-2015 Xiaowei Zhu, Tsinghua University
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <thread>
 
 #include "core/graph.hpp"
 
@@ -131,15 +132,21 @@ void compute(Graph<Empty> * graph, int iterations) {
 int main(int argc, char ** argv) {
   // MPI_Instance mpi(&argc, &argv);
 
-  if (argc<6) {
-    printf("pagerank [file] [vertices] [iterations] [stage1 threads] [stage2 threads]\n");
-    exit(-1);
+  if (argc < 4) {
+    fprintf(stderr, "Usage: %s <file> <vertices> <iterations> [stage1 threads] [stage2 threads]\n", argv[0]);
+    fprintf(stderr, "  <file>: Path to the graph file (required).\n");
+    fprintf(stderr, "  <vertices>: Number of vertices in the graph (required).\n");
+    fprintf(stderr, "  <iterations>: Number of PageRank iterations (required).\n");
+    fprintf(stderr, "  [stage1 threads]: Number of threads for stage 1 (optional, default: hardware concurrency).\n");
+    fprintf(stderr, "  [stage2 threads]: Number of threads for stage 2 (optional, default: same as stage 1).\n");
+    exit(EXIT_FAILURE);
   }
 
   Graph<Empty> *graph;
 
-  uint32_t thread_count1 = std::atoi(argv[4]);
-  uint32_t thread_count2 = std::atoi(argv[5]);
+  uint32_t thread_count1 = (argc > 4) ? std::atoi(argv[4]) : std::thread::hardware_concurrency();
+  uint32_t thread_count2 = (argc > 5) ? std::atoi(argv[5]) : thread_count1;
+
   Parallel::SetThreadCount(thread_count1);
   
   graph = new Graph<Empty>(thread_count2);
