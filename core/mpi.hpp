@@ -23,10 +23,11 @@ Copyright (c) 2015-2016 Xiaowei Zhu, Tsinghua University
 #include <chrono>
 
 inline double WTime() {
-  auto now = std::chrono::high_resolution_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-      now.time_since_epoch());
-  return (double)duration.count() / 1000000.0;
+    // auto now = std::chrono::high_resolution_clock::now();
+    // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+    //     now.time_since_epoch());
+    // return (double)duration.count() / 1000000.0;
+    return 0;
 }
 
 // #include <mpi.h>
