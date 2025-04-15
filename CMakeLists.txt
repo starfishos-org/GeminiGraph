@@ -8,8 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 # 设置编译器为 mpicxx
 # set(CMAKE_CXX_COMPILER mpicxx)
 
-# set(CMAKE_BUILD_TYPE Debug)
-set(CMAKE_BUILD_TYPE Release)
+set(CMAKE_BUILD_TYPE Debug)
+# set(CMAKE_BUILD_TYPE Release)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -21,7 +21,7 @@ if(CMAKE_C_COMPILER MATCHES "musl-gcc")
 endif()
 
 # 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -g -march=native -fPIE -pie ")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -march=native -fPIE -pie")
 # 如果需要启用宏定义，取消下面行的注释
 # add_definitions(-DPRINT_DEBUG_MESSAGES)
 
