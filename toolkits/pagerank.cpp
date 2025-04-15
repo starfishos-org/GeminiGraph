@@ -129,6 +129,22 @@ void compute(Graph<Empty> * graph, int iterations) {
   delete active;
 }
 
+void bind_cpu(uint32_t cpu_id) {
+  #ifdef OS_CHCORE
+      cpu_set_t cpu_set;
+      CPU_ZERO(&cpu_set);
+      CPU_SET(cpu_id, &cpu_set);
+      sched_setaffinity(-2, sizeof(cpu_set), &cpu_set);
+      sched_yield();
+  #else
+      cpu_set_t cpu_set;
+      CPU_ZERO(&cpu_set);
+      CPU_SET(cpu_id, &cpu_set);
+      pthread_setaffinity_np(pthread_self(), sizeof(cpu_set), &cpu_set);
+      sched_yield();
+  #endif
+    }
+
 int main(int argc, char ** argv) {
   // MPI_Instance mpi(&argc, &argv);
 
@@ -142,10 +158,13 @@ int main(int argc, char ** argv) {
     exit(EXIT_FAILURE);
   }
 
+  bind_cpu(0);
+
   Graph<Empty> *graph;
 
   uint32_t thread_count1 = (argc > 4) ? std::atoi(argv[4]) : std::thread::hardware_concurrency();
   uint32_t thread_count2 = (argc > 5) ? std::atoi(argv[5]) : thread_count1;
+
 
   Parallel::SetThreadCount(thread_count1);
   
@@ -161,5 +180,6 @@ int main(int argc, char ** argv) {
   }
 
   delete graph;
+  printf("Pagerank is done.\n");
   return 0;
 }
