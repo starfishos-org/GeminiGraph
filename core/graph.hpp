@@ -1821,7 +1821,7 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
       // }
       Parallel::For([&](int t_i) {
         flush_local_send_buffer<M>(t_i);
-      }, 0, threads);
+      }, 0, threads, 1, 1);
       // recv_queue[recv_queue_size] = partition_id;
       // recv_queue_mutex.lock();
       // recv_queue_size += 1;

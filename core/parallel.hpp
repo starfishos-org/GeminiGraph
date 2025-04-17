@@ -145,11 +145,17 @@ public:
   }
 
   template <typename Func>
-  static void For(Func func, uint64_t start, uint64_t end, uint64_t incr = 1) {
+  static void For(Func func, uint64_t start, uint64_t end, uint64_t incr = 1,
+                  int64_t user_defined_chunk_size = -1) {
+    uint64_t chunk_size;
     // Adjust chunk size to account for 'incr'
-    uint64_t chunk_size = std::max(
-        ((end - start + incr - 1) / incr + thread_count - 1) / thread_count,
-        min_chunk_size);
+    if (user_defined_chunk_size == -1) {
+      chunk_size = std::max(
+          ((end - start + incr - 1) / incr + thread_count - 1) / thread_count,
+          min_chunk_size);
+    } else {
+      chunk_size = user_defined_chunk_size;
+    }
 
     uint64_t total_chunks =
         ((end - start + incr - 1) / incr + chunk_size - 1) / chunk_size;
