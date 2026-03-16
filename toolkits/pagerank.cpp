@@ -27,8 +27,13 @@ Copyright (c) 2014-2015 Xiaowei Zhu, Tsinghua University
 
 const double d = (double)0.85;
 
-void print_data_structure(Graph<Empty> * graph) {
-  printf("[PR][part=%d] curr: [%p-%p) next: [%p-%p) active_data: [%p-%p) out_degree: [%p-%p) in_degree: [%p-%p) partition_offset: [%p-%p) local_partition_offset: [%p-%p)",
+void print_data_structure(Graph<Empty> * graph, double * curr, double * next, VertexSubset * active) {
+  printf("[PR][part=%d] curr: [%p-%p) next: [%p-%p) active_data: [%p-%p) out_degree: [%p-%p) in_degree: [%p-%p) partition_offset: [%p-%p) local_partition_offset: [%p-%p)"
+#ifdef OS_CHCORE
+         " incoming_adj_list_replica[m=%d][0]: [%p-%p) incoming_adj_list_replica[m=%d][1]: [%p-%p)"
+         " compressed_incoming_adj_index_replica[m=%d][0]: [%p-%p) compressed_incoming_adj_index_replica[m=%d][1]: [%p-%p)"
+#endif
+         ,
     graph->partition_id,
     (void *)curr, (void *)((char *)curr + graph->vertices * sizeof(double)),
     (void *)next, (void *)((char *)next + graph->vertices * sizeof(double)),
@@ -47,7 +52,45 @@ void print_data_structure(Graph<Empty> * graph) {
     (void *)graph->partition_offset,
     (void *)((char *)graph->partition_offset + (graph->partitions + 1) * sizeof(VertexId)),
     (void *)graph->local_partition_offset,
-    (void *)((char *)graph->local_partition_offset + (graph->sockets + 1) * sizeof(VertexId)));
+    (void *)((char *)graph->local_partition_offset + (graph->sockets + 1) * sizeof(VertexId))
+#ifdef OS_CHCORE
+    ,
+    graph->get_cur_machine_id(),
+    (void *)(graph->use_incoming_replica
+               ? (void *)graph->incoming_adj_list_replica[graph->get_cur_machine_id()][0]
+               : nullptr),
+    (void *)(graph->use_incoming_replica
+               ? (void *)((char *)graph->incoming_adj_list_replica[graph->get_cur_machine_id()][0]
+                          + (long)graph->incoming_edges[0] * graph->unit_size)
+               : nullptr),
+    graph->get_cur_machine_id(),
+    (void *)(graph->use_incoming_replica
+               ? (void *)graph->incoming_adj_list_replica[graph->get_cur_machine_id()][1]
+               : nullptr),
+    (void *)(graph->use_incoming_replica
+               ? (void *)((char *)graph->incoming_adj_list_replica[graph->get_cur_machine_id()][1]
+                          + (long)graph->incoming_edges[1] * graph->unit_size)
+               : nullptr),
+    graph->get_cur_machine_id(),
+    (void *)(graph->use_incoming_replica
+               ? (void *)graph->compressed_incoming_adj_index_replica[graph->get_cur_machine_id()][0]
+               : nullptr),
+    (void *)(graph->use_incoming_replica
+               ? (void *)((char *)graph->compressed_incoming_adj_index_replica[graph->get_cur_machine_id()][0]
+                          + (graph->compressed_incoming_adj_vertices[0] + 1)
+                            * sizeof(CompressedAdjIndexUnit))
+               : nullptr),
+    graph->get_cur_machine_id(),
+    (void *)(graph->use_incoming_replica
+               ? (void *)graph->compressed_incoming_adj_index_replica[graph->get_cur_machine_id()][1]
+               : nullptr),
+    (void *)(graph->use_incoming_replica
+               ? (void *)((char *)graph->compressed_incoming_adj_index_replica[graph->get_cur_machine_id()][1]
+                          + (graph->compressed_incoming_adj_vertices[1] + 1)
+                            * sizeof(CompressedAdjIndexUnit))
+               : nullptr)
+#endif
+  );
   for (int s_i = 0; s_i < graph->sockets; s_i++) {
     VertexId local_start = graph->local_partition_offset[s_i];
     VertexId local_end = graph->local_partition_offset[s_i + 1];
@@ -110,20 +153,23 @@ void print_data_structure(Graph<Empty> * graph) {
 }
 
 void compute(Graph<Empty> * graph, int iterations) {
+#ifdef PRINT_VMSPACE_STATS
   usys_print_vmspace_stats();
+#endif
   double exec_time = 0;
   exec_time -= get_time();
 
+#ifdef OS_CHCORE
+  // 在 ChCore 上，直接把 curr/next 分配在 CXL 共享内存上
+  double * curr = graph->alloc_vertex_array_cxl<double>();
+  double * next = graph->alloc_vertex_array_cxl<double>();
+#else
   double * curr = graph->alloc_vertex_array<double>();
   double * next = graph->alloc_vertex_array<double>();
+#endif
   VertexSubset * active = graph->alloc_vertex_subset();
 #ifdef PRINT_DATA_STRUCTURE
-  printf("[PR][part=%d] curr: [%p-%p) next: [%p-%p) active_data: [%p-%p) ",
-    graph->partition_id,
-    (void *)curr, (void *)((char *)curr + graph->vertices * sizeof(double)),
-    (void *)next, (void *)((char *)next + graph->vertices * sizeof(double)),
-    (void *)active->data, (void *)((char *)active->data + graph->vertices * sizeof(VertexId)));
-  print_data_structure(graph);
+  print_data_structure(graph, curr, next, active);
 #endif
   active->fill();
 
@@ -218,7 +264,9 @@ void compute(Graph<Empty> * graph, int iterations) {
     printf("pr[%u]=%lf\n", max_v_i, curr[max_v_i]);
   }
 
+#ifdef PRINT_VMSPACE_STATS
   usys_print_vmspace_stats();
+#endif
 
   graph->dealloc_vertex_array(curr);
   graph->dealloc_vertex_array(next);

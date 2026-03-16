@@ -23,8 +23,9 @@ endif()
 # 设置编译选项（不在这里加 PIE，由每个 target 单独控制）
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -march=native -O3")
 # 如果需要启用宏定义，取消下面行的注释
-add_definitions(-DPRINT_CHUNKS_INFO)
-add_definitions(-DPRINT_DATA_STRUCTURE)
+# add_definitions(-DPRINT_CHUNKS_INFO)
+# add_definitions(-DPRINT_DATA_STRUCTURE)
+# add_definitions(-DPRINT_VMSPACE_STATS)
 
 # 包含头文件目录
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})

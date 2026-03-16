@@ -136,6 +136,14 @@ public:
   VertexId * compressed_outgoing_adj_vertices;
   CompressedAdjIndexUnit ** compressed_outgoing_adj_index; // CompressedAdjIndexUnit [sockets] [...+1]; numa-aware
 
+#ifdef OS_CHCORE
+  /* Per-machine full incoming_adj_list replica ([part0][part1]); enables cross-machine steal without CXL migration */
+  AdjUnit<EdgeData> *** incoming_adj_list_replica;  // [sockets][sockets]
+  /* Per-machine full compressed_incoming_adj_index replica; paired with incoming_adj_list_replica */
+  CompressedAdjIndexUnit *** compressed_incoming_adj_index_replica;  // [sockets][sockets]
+  bool use_incoming_replica;
+#endif
+
   ThreadState ** thread_state; // ThreadState* [threads]; numa-aware
   ThreadState ** tuned_chunks_dense; // ThreadState [partitions][threads];
   ThreadState ** tuned_chunks_sparse; // ThreadState [partitions][threads];
@@ -180,12 +188,35 @@ public:
     init();
   }
 
-  inline int get_socket_id(int thread_id) {
+  inline int get_socket_id(int thread_id) const {
     return thread_id / threads_per_socket;
   }
 
-  inline int get_socket_offset(int thread_id) {
+  inline int get_socket_offset(int thread_id) const {
     return thread_id % threads_per_socket;
+  }
+
+#ifdef OS_CHCORE
+  int get_cur_machine_id() const {
+    if (use_incoming_replica && (uint32_t)ThreadPool::thread_id < (uint32_t)threads)
+      return get_socket_id(ThreadPool::thread_id);
+    return 0;  /* main thread or unknown: assume machine 0 */
+  }
+#endif
+  inline AdjUnit<EdgeData>* get_incoming_adj_list(int s_i) const {
+#ifdef OS_CHCORE
+    if (use_incoming_replica)
+      return incoming_adj_list_replica[get_cur_machine_id()][s_i];
+#endif
+    return incoming_adj_list[s_i];
+  }
+
+  inline CompressedAdjIndexUnit* get_compressed_incoming_adj_index(int s_i) const {
+#ifdef OS_CHCORE
+    if (use_incoming_replica)
+      return compressed_incoming_adj_index_replica[get_cur_machine_id()][s_i];
+#endif
+    return compressed_incoming_adj_index[s_i];
   }
 
   /* NUMA-aware accessors for out_degree/in_degree (per-socket arrays). */
@@ -269,6 +300,12 @@ public:
 
     alpha = 8 * (partitions - 1);
 
+#ifdef OS_CHCORE
+    use_incoming_replica = false;
+    incoming_adj_list_replica = nullptr;
+    compressed_incoming_adj_index_replica = nullptr;
+#endif
+
     // MPI_Barrier(MPI_COMM_WORLD);
   }
 
@@ -295,6 +332,28 @@ public:
     // }
     return (T*)array;
   }
+
+#ifdef OS_CHCORE
+  // allocate a vertex array directly in CXL (shared) memory
+  template<typename T>
+  T * alloc_vertex_array_cxl() {
+    char * array = (char *)mmap(NULL,
+                                sizeof(T) * vertices,
+                                PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FLAG_SHARED,
+                                -1,
+                                0);
+    assert(array != NULL);
+    return (T *)array;
+  }
+  /* Allocate arbitrary-size buffer in CXL (shared); avoids cross-machine migration during replicate. */
+  static void * alloc_cxl_raw(size_t bytes) {
+    void * p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FLAG_SHARED, -1, 0);
+    assert(p != NULL && p != MAP_FAILED);
+    return p;
+  }
+#endif
 
   // deallocate a vertex array
   template <typename T> void dealloc_vertex_array(T *array) {
@@ -726,7 +785,13 @@ public:
           compressed_outgoing_adj_vertices[s_i] += 1;
         }
       }
+#ifdef OS_CHCORE
+      compressed_outgoing_adj_index[s_i] = (sockets > 1)
+        ? (CompressedAdjIndexUnit*)alloc_cxl_raw(sizeof(CompressedAdjIndexUnit) * (compressed_outgoing_adj_vertices[s_i] + 1))
+        : (CompressedAdjIndexUnit*)malloc(sizeof(CompressedAdjIndexUnit) * (compressed_outgoing_adj_vertices[s_i] + 1));
+#else
       compressed_outgoing_adj_index[s_i] = (CompressedAdjIndexUnit*)malloc( sizeof(CompressedAdjIndexUnit) * (compressed_outgoing_adj_vertices[s_i] + 1));
+#endif
       compressed_outgoing_adj_index[s_i][0].index = 0;
       EdgeId last_e_i = 0;
       compressed_outgoing_adj_vertices[s_i] = 0;
@@ -747,7 +812,13 @@ public:
       #ifdef PRINT_DEBUG_MESSAGES
       printf("part(%d) E_%d has %lu symmetric edges\n", partition_id, s_i, outgoing_edges[s_i]);
       #endif
+#ifdef OS_CHCORE
+      outgoing_adj_list[s_i] = (sockets > 1)
+        ? (AdjUnit<EdgeData>*)alloc_cxl_raw(unit_size * outgoing_edges[s_i])
+        : (AdjUnit<EdgeData>*)malloc(unit_size * outgoing_edges[s_i]);
+#else
       outgoing_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * outgoing_edges[s_i]);
+#endif
     }
     {
       // std::thread recv_thread_dst([&]() {
@@ -890,6 +961,12 @@ public:
     compressed_incoming_adj_index = compressed_outgoing_adj_index;
     // MPI_Barrier(MPI_COMM_WORLD);
 
+#ifdef OS_CHCORE
+    if (sockets > 1) {
+      replicate_incoming_adj_list();
+    }
+#endif
+
     delete [] buffered_edges;
     delete [] send_buffer;
     delete [] read_edge_buffer;
@@ -919,6 +996,35 @@ public:
     std::swap(compressed_outgoing_adj_vertices, compressed_incoming_adj_vertices);
     std::swap(compressed_outgoing_adj_index, compressed_incoming_adj_index);
   }
+
+#ifdef OS_CHCORE
+  void replicate_incoming_adj_list() {
+    if (sockets <= 1) return;
+    incoming_adj_list_replica = new AdjUnit<EdgeData>**[sockets];
+    compressed_incoming_adj_index_replica = new CompressedAdjIndexUnit**[sockets];
+    Parallel::InvokePerMachine([this](uint32_t m) {
+      /* Replicate incoming_adj_list */
+      size_t total_edges = (size_t)incoming_edges[0] + (size_t)incoming_edges[1];
+      size_t total_bytes = unit_size * total_edges;
+      AdjUnit<EdgeData>* full_buf = (AdjUnit<EdgeData>*)malloc(total_bytes);
+      memcpy(full_buf, incoming_adj_list[0], unit_size * incoming_edges[0]);
+      memcpy(full_buf + incoming_edges[0], incoming_adj_list[1], unit_size * incoming_edges[1]);
+      incoming_adj_list_replica[m] = new AdjUnit<EdgeData>*[sockets];
+      incoming_adj_list_replica[m][0] = full_buf;
+      incoming_adj_list_replica[m][1] = full_buf + incoming_edges[0];
+      /* Replicate compressed_incoming_adj_index for cross-machine steal without CXL migration */
+      compressed_incoming_adj_index_replica[m] = new CompressedAdjIndexUnit*[sockets];
+      for (int s_i = 0; s_i < sockets; s_i++) {
+        size_t n = (size_t)(compressed_incoming_adj_vertices[s_i] + 1);
+        size_t sz = n * sizeof(CompressedAdjIndexUnit);
+        CompressedAdjIndexUnit* buf = (CompressedAdjIndexUnit*)malloc(sz);
+        memcpy(buf, compressed_incoming_adj_index[s_i], sz);
+        compressed_incoming_adj_index_replica[m][s_i] = buf;
+      }
+      use_incoming_replica = true;
+    });
+  }
+#endif
 
   // load a directed graph from path
   void load_directed(std::string path, VertexId vertices) {
@@ -1682,7 +1788,13 @@ public:
         incoming_edges[s_i] += local_edges[t];
         compressed_incoming_adj_vertices[s_i] += local_verts[t];
       }
+#ifdef OS_CHCORE
+      compressed_incoming_adj_index[s_i] = (sockets > 1)
+        ? (CompressedAdjIndexUnit*)alloc_cxl_raw(sizeof(CompressedAdjIndexUnit) * (compressed_incoming_adj_vertices[s_i] + 1))
+        : (CompressedAdjIndexUnit*)malloc(sizeof(CompressedAdjIndexUnit) * (compressed_incoming_adj_vertices[s_i] + 1));
+#else
       compressed_incoming_adj_index[s_i] = (CompressedAdjIndexUnit*)malloc( sizeof(CompressedAdjIndexUnit) * (compressed_incoming_adj_vertices[s_i] + 1));
+#endif
       compressed_incoming_adj_index[s_i][0].index = 0;
       EdgeId last_e_i = 0;
       compressed_incoming_adj_vertices[s_i] = 0;
@@ -1713,7 +1825,13 @@ public:
       #ifdef PRINT_DEBUG_MESSAGES
       printf("part(%d) E_%d has %lu dense mode edges\n", partition_id, s_i, incoming_edges[s_i]);
       #endif
+#ifdef OS_CHCORE
+      incoming_adj_list[s_i] = (sockets > 1)
+        ? (AdjUnit<EdgeData>*)alloc_cxl_raw(unit_size * incoming_edges[s_i])
+        : (AdjUnit<EdgeData>*)malloc(unit_size * incoming_edges[s_i]);
+#else
       incoming_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * incoming_edges[s_i]);
+#endif
     });
     {
 //       std::thread recv_thread_src([&]() {
@@ -1884,6 +2002,13 @@ public:
     tune_chunks();
     transpose();
     tune_chunks();
+
+#ifdef OS_CHCORE
+    /* Replicate after transposes so we copy the final incoming_adj_list used by compute */
+    if (sockets > 1) {
+      replicate_incoming_adj_list();
+    }
+#endif
 
     prep_time += WTime();
 
@@ -2441,8 +2566,9 @@ public:
               end_p_v_i = final_p_v_i;
             }
             for (VertexId p_v_i = begin_p_v_i; p_v_i < end_p_v_i; p_v_i ++) {
-              VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
-              dense_signal(v_i, VertexAdjList<EdgeData>(incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i].index, incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i+1].index));
+              CompressedAdjIndexUnit* cidx = get_compressed_incoming_adj_index(s_i);
+              VertexId v_i = cidx[p_v_i].vertex;
+              dense_signal(v_i, VertexAdjList<EdgeData>(get_incoming_adj_list(s_i) + cidx[p_v_i].index, get_incoming_adj_list(s_i) + cidx[p_v_i+1].index));
             }
           }
           thread_state[thread_id]->status = STEALING;
@@ -2456,9 +2582,10 @@ public:
               if (end_p_v_i > thread_state[t_i]->end) {
                 end_p_v_i = thread_state[t_i]->end;
               }
+              CompressedAdjIndexUnit* cidx = get_compressed_incoming_adj_index(s_i);
               for (VertexId p_v_i = begin_p_v_i; p_v_i < end_p_v_i; p_v_i ++) {
-                VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
-                dense_signal(v_i, VertexAdjList<EdgeData>(incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i].index, incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i+1].index));
+                VertexId v_i = cidx[p_v_i].vertex;
+                dense_signal(v_i, VertexAdjList<EdgeData>(get_incoming_adj_list(s_i) + cidx[p_v_i].index, get_incoming_adj_list(s_i) + cidx[p_v_i+1].index));
               }
             }
           }
@@ -2475,14 +2602,19 @@ public:
               if (end_p_v_i > final_p_v_i) {
                 end_p_v_i = final_p_v_i;
               }
+              CompressedAdjIndexUnit* cidx = get_compressed_incoming_adj_index(s_i);
               for (VertexId p_v_i = begin_p_v_i; p_v_i < end_p_v_i; p_v_i ++) {
-                VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
-                dense_signal(v_i, VertexAdjList<EdgeData>(incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i].index, incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i+1].index));
+                VertexId v_i = cidx[p_v_i].vertex;
+                dense_signal(v_i, VertexAdjList<EdgeData>(get_incoming_adj_list(s_i) + cidx[p_v_i].index, get_incoming_adj_list(s_i) + cidx[p_v_i+1].index));
               }
             }
             thread_state[thread_id]->status = STEALING;
-            for (int t_offset=1;t_offset<threads;t_offset++) {
-              int t_i = (thread_id + t_offset) % threads;
+            // for (int t_offset=1;t_offset<threads;t_offset++) {
+              // int t_i = (thread_id + t_offset) % threads;
+            /* steal from the current socket first, then from other sockets */
+            int socket_begin = get_socket_id(thread_id) * threads_per_socket;
+            for (int t_i=socket_begin;t_i<socket_begin+threads;t_i++) {
+              if (t_i == thread_id) continue;
               int s_i = get_socket_id(t_i);
               while (thread_state[t_i]->status!=STEALING) {
                 VertexId begin_p_v_i = __sync_fetch_and_add(&thread_state[t_i]->curr, basic_chunk);
@@ -2491,21 +2623,22 @@ public:
                 if (end_p_v_i > thread_state[t_i]->end) {
                   end_p_v_i = thread_state[t_i]->end;
                 }
+                CompressedAdjIndexUnit* cidx = get_compressed_incoming_adj_index(s_i);
                 for (VertexId p_v_i = begin_p_v_i; p_v_i < end_p_v_i; p_v_i ++) {
-                  VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
-                  dense_signal(v_i, VertexAdjList<EdgeData>(incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i].index, incoming_adj_list[s_i] + compressed_incoming_adj_index[s_i][p_v_i+1].index));
+                  VertexId v_i = cidx[p_v_i].vertex;
+                  dense_signal(v_i, VertexAdjList<EdgeData>(get_incoming_adj_list(s_i) + cidx[p_v_i].index, get_incoming_adj_list(s_i) + cidx[p_v_i+1].index));
                 }
               }
             }
           };
           
-          double dense_pull_invoke_time = 0;
-          dense_pull_invoke_time -= get_time();
+          // double dense_pull_invoke_time = 0;
+          // dense_pull_invoke_time -= get_time();
           Parallel::Invoke(func, threads);
-          dense_pull_invoke_time += get_time();
-          if (partition_id == 0) {
-            printf("[profile][dense_pull_invoke] time=%lf(s)\n", dense_pull_invoke_time);
-          }
+          // dense_pull_invoke_time += get_time();
+          // if (partition_id == 0) {
+          //   printf("[profile][dense_pull_invoke] time=%lf(s)\n", dense_pull_invoke_time);
+          // }
         }
       }
       
