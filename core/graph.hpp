@@ -1079,23 +1079,37 @@ public:
     run_on_loader_threads([&](int s_i) {
       VertexId count = local_partition_offset[s_i + 1] - local_partition_offset[s_i];
       out_degree_by_socket[s_i] = (VertexId*)malloc(sizeof(VertexId) * count);
-      for (VertexId i = 0; i < count; i++) {
-        VertexId v = local_partition_offset[s_i] + i;
-        int ps = (vertices > 0) ? (int)((uint64_t)v * sockets / vertices) : 0;
-        if (ps >= sockets) ps = sockets - 1;
-        out_degree_by_socket[s_i][i] = out_degree_prelim[ps][v - prelim_local_partition_offset[ps]];
-      }
+      uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, (size_t)count);
+      if (nw == 0) nw = 1;
+      Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+        size_t chunk = ((size_t)count + nw - 1) / nw;
+        VertexId i_beg = (VertexId)((size_t)tid * chunk);
+        VertexId i_end = (VertexId)std::min(i_beg + (VertexId)chunk, count);
+        for (VertexId i = i_beg; i < i_end; i++) {
+          VertexId v = local_partition_offset[s_i] + i;
+          int ps = (vertices > 0) ? (int)((uint64_t)v * sockets / vertices) : 0;
+          if (ps >= sockets) ps = sockets - 1;
+          out_degree_by_socket[s_i][i] = out_degree_prelim[ps][v - prelim_local_partition_offset[ps]];
+        }
+      }, 0, nw);
     });
-    for (int s_i = 0; s_i < sockets; s_i++) {
+    run_on_loader_threads([&](int s_i) {
       free(out_degree_prelim[s_i]);
-    }
+    });
     in_degree_by_socket = new VertexId* [sockets];
     run_on_loader_threads([&](int s_i) {
       VertexId count = local_partition_offset[s_i + 1] - local_partition_offset[s_i];
       in_degree_by_socket[s_i] = (VertexId*)malloc(sizeof(VertexId) * count);
-      for (VertexId i = 0; i < count; i++) {
-        in_degree_by_socket[s_i][i] = 0;
-      }
+      uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, (size_t)count);
+      if (nw == 0) nw = 1;
+      Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+        size_t chunk = ((size_t)count + nw - 1) / nw;
+        VertexId i_beg = (VertexId)((size_t)tid * chunk);
+        VertexId i_end = (VertexId)std::min(i_beg + (VertexId)chunk, count);
+        for (VertexId i = i_beg; i < i_end; i++) {
+          in_degree_by_socket[s_i][i] = 0;
+        }
+      }, 0, nw);
     });
 
     int * buffered_edges = new int [partitions];
@@ -1152,35 +1166,68 @@ public:
       // });
       auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
                                          int recv_edges) {
-#if 0
-        #pragma omp parallel for
-        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
-          VertexId src = recv_buffer[e_i].src;
-          VertexId dst = recv_buffer[e_i].dst;
-          assert(dst >= partition_offset[partition_id] &&
-                 dst < partition_offset[partition_id + 1]);
-          int dst_part = get_local_partition_id(dst);
-          if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
-            outgoing_adj_bitmap[dst_part]->set_bit(src);
-            outgoing_adj_index[dst_part][src] = 0;
+        // 将边按 dst 所在 socket 分桶，然后在对应 socket 的 loader 线程上串行处理，
+        // 避免 cross-socket 线程访问其它 socket 的 outgoing_adj_list。
+        std::vector<std::vector<EdgeUnit<EdgeData>>> buckets(sockets);
+        buckets.assign(sockets, std::vector<EdgeUnit<EdgeData>>());
+        const EdgeId PAR_BUCKET_THRESHOLD = 8192;
+        if (recv_edges >= PAR_BUCKET_THRESHOLD && threads > 1) {
+          uint32_t nw = (uint32_t)std::min((size_t)threads, (size_t)recv_edges);
+          std::vector<std::vector<std::vector<EdgeUnit<EdgeData>>>> thread_buckets(nw);
+          for (uint32_t t = 0; t < nw; t++) thread_buckets[t].resize(sockets);
+          Parallel::Invoke([&](uint32_t tid) {
+            size_t chunk = ((size_t)recv_edges + nw - 1) / nw;
+            EdgeId beg = (EdgeId)((size_t)tid * chunk);
+            EdgeId end = (EdgeId)std::min(beg + (EdgeId)chunk, (EdgeId)recv_edges);
+            for (EdgeId e_i = beg; e_i < end; e_i++) {
+              VertexId dst = recv_buffer[e_i].dst;
+              if (dst < partition_offset[partition_id] ||
+                  dst >= partition_offset[partition_id + 1]) continue;
+              int dst_part = get_local_partition_id(dst);
+              if (dst_part < 0 || dst_part >= sockets) continue;
+              thread_buckets[tid][dst_part].push_back(recv_buffer[e_i]);
+            }
+          }, nw);
+          for (int s = 0; s < sockets; s++) {
+            for (uint32_t t = 0; t < nw; t++) {
+              auto &tb = thread_buckets[t][s];
+              buckets[s].insert(buckets[s].end(), tb.begin(), tb.end());
+            }
           }
-          __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
-          __sync_fetch_and_add(&in_degree[dst], 1);
+        } else {
+          for (EdgeId e_i = 0; e_i < (EdgeId)recv_edges; e_i++) {
+            VertexId dst = recv_buffer[e_i].dst;
+            if (dst < partition_offset[partition_id] ||
+                dst >= partition_offset[partition_id + 1]) continue;
+            int dst_part = get_local_partition_id(dst);
+            if (dst_part < 0 || dst_part >= sockets) continue;
+            buckets[dst_part].push_back(recv_buffer[e_i]);
+          }
         }
-#endif
-        Parallel::For([&](EdgeId e_i) {
-          VertexId src = recv_buffer[e_i].src;
-          VertexId dst = recv_buffer[e_i].dst;
-          assert(dst >= partition_offset[partition_id] &&
-                 dst < partition_offset[partition_id + 1]);
-          int dst_part = get_local_partition_id(dst);
-          if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
-            outgoing_adj_bitmap[dst_part]->set_bit(src);
-            outgoing_adj_index[dst_part][src] = 0;
-          }
-          __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
-          __sync_fetch_and_add(get_in_degree_ptr(dst), 1);
-        }, 0, recv_edges);
+        run_on_loader_threads([&](int s_i) {
+          auto &bucket = buckets[s_i];
+          if (bucket.empty()) return;
+          uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, bucket.size());
+          if (nw == 0) nw = 1;
+          Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+            size_t chunk = (bucket.size() + nw - 1) / nw;
+            size_t beg = (size_t)tid * chunk;
+            size_t end = std::min(beg + chunk, bucket.size());
+            for (size_t idx = beg; idx < end; idx++) {
+              const EdgeUnit<EdgeData> &eu = bucket[idx];
+              VertexId src = eu.src;
+              VertexId dst = eu.dst;
+              assert(dst >= partition_offset[partition_id] &&
+                     dst < partition_offset[partition_id + 1]);
+              if (!outgoing_adj_bitmap[s_i]->get_bit(src)) {
+                outgoing_adj_bitmap[s_i]->set_bit(src);
+                outgoing_adj_index[s_i][src] = 0;
+              }
+              __sync_fetch_and_add(&outgoing_adj_index[s_i][src], 1);
+              __sync_fetch_and_add(get_in_degree_ptr(dst), 1);
+            }
+          }, 0, nw);
+        });
         recv_outgoing_edges += recv_edges;
       };
       for (int i=0;i<partitions;i++) {
@@ -1229,39 +1276,74 @@ public:
     }
     compressed_outgoing_adj_vertices = new VertexId [sockets];
     compressed_outgoing_adj_index = new CompressedAdjIndexUnit * [sockets];
-    for (int s_i=0;s_i<sockets;s_i++) {
+    run_on_loader_threads([&](int s_i) {
+      uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, (size_t)vertices);
+      if (nw == 0) nw = 1;
+      std::vector<EdgeId> local_edges(nw, 0);
+      std::vector<VertexId> local_verts(nw, 0);
+      Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+        size_t chunk = ((size_t)vertices + nw - 1) / nw;
+        VertexId beg = (VertexId)((size_t)tid * chunk);
+        VertexId end = (VertexId)std::min(beg + (VertexId)chunk, (VertexId)vertices);
+        EdgeId le = 0;
+        VertexId lv = 0;
+        for (VertexId v_i = beg; v_i < end; v_i++) {
+          if (outgoing_adj_bitmap[s_i]->get_bit(v_i)) {
+            le += outgoing_adj_index[s_i][v_i];
+            lv += 1;
+          }
+        }
+        local_edges[tid] = le;
+        local_verts[tid] = lv;
+      }, 0, nw);
       outgoing_edges[s_i] = 0;
       compressed_outgoing_adj_vertices[s_i] = 0;
-      for (VertexId v_i=0;v_i<vertices;v_i++) {
-        if (outgoing_adj_bitmap[s_i]->get_bit(v_i)) {
-          outgoing_edges[s_i] += outgoing_adj_index[s_i][v_i];
-          compressed_outgoing_adj_vertices[s_i] += 1;
-        }
+      for (uint32_t t = 0; t < nw; t++) {
+        outgoing_edges[s_i] += local_edges[t];
+        compressed_outgoing_adj_vertices[s_i] += local_verts[t];
       }
-    }
-    run_on_loader_threads([&](int s_i) {
-      compressed_outgoing_adj_index[s_i] = (CompressedAdjIndexUnit*)malloc( sizeof(CompressedAdjIndexUnit) * (compressed_outgoing_adj_vertices[s_i] + 1) );
+      compressed_outgoing_adj_index[s_i] =
+          (CompressedAdjIndexUnit*)malloc(
+              sizeof(CompressedAdjIndexUnit) *
+              (compressed_outgoing_adj_vertices[s_i] + 1));
       compressed_outgoing_adj_index[s_i][0].index = 0;
       EdgeId last_e_i = 0;
       compressed_outgoing_adj_vertices[s_i] = 0;
       for (VertexId v_i=0;v_i<vertices;v_i++) {
         if (outgoing_adj_bitmap[s_i]->get_bit(v_i)) {
-          outgoing_adj_index[s_i][v_i] = last_e_i + outgoing_adj_index[s_i][v_i];
+          outgoing_adj_index[s_i][v_i] =
+              last_e_i + outgoing_adj_index[s_i][v_i];
           last_e_i = outgoing_adj_index[s_i][v_i];
-          compressed_outgoing_adj_index[s_i][compressed_outgoing_adj_vertices[s_i]].vertex = v_i;
+          compressed_outgoing_adj_index[s_i]
+              [compressed_outgoing_adj_vertices[s_i]].vertex = v_i;
           compressed_outgoing_adj_vertices[s_i] += 1;
-          compressed_outgoing_adj_index[s_i][compressed_outgoing_adj_vertices[s_i]].index = last_e_i;
+          compressed_outgoing_adj_index[s_i]
+              [compressed_outgoing_adj_vertices[s_i]].index = last_e_i;
         }
       }
-      for (VertexId p_v_i=0;p_v_i<compressed_outgoing_adj_vertices[s_i];p_v_i++) {
-        VertexId v_i = compressed_outgoing_adj_index[s_i][p_v_i].vertex;
-        outgoing_adj_index[s_i][v_i] = compressed_outgoing_adj_index[s_i][p_v_i].index;
-        outgoing_adj_index[s_i][v_i+1] = compressed_outgoing_adj_index[s_i][p_v_i+1].index;
+      {
+        VertexId ncv = compressed_outgoing_adj_vertices[s_i];
+        uint32_t nw2 = (uint32_t)std::min((size_t)threads_per_socket, (size_t)ncv);
+        if (nw2 == 0) nw2 = 1;
+        Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+          size_t chunk = ((size_t)ncv + nw2 - 1) / nw2;
+          VertexId p_beg = (VertexId)((size_t)tid * chunk);
+          VertexId p_end = (VertexId)std::min(p_beg + (VertexId)chunk, ncv);
+          for (VertexId p_v_i = p_beg; p_v_i < p_end; p_v_i++) {
+            VertexId v_i = compressed_outgoing_adj_index[s_i][p_v_i].vertex;
+            outgoing_adj_index[s_i][v_i] =
+                compressed_outgoing_adj_index[s_i][p_v_i].index;
+            outgoing_adj_index[s_i][v_i+1] =
+                compressed_outgoing_adj_index[s_i][p_v_i+1].index;
+          }
+        }, 0, nw2);
       }
       #ifdef PRINT_DEBUG_MESSAGES
-      printf("part(%d) E_%d has %lu sparse mode edges\n", partition_id, s_i, outgoing_edges[s_i]);
+      printf("part(%d) E_%d has %lu sparse mode edges\n",
+             partition_id, s_i, outgoing_edges[s_i]);
       #endif
-      outgoing_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * outgoing_edges[s_i]);
+      outgoing_adj_list[s_i] =
+          (AdjUnit<EdgeData>*)malloc(unit_size * outgoing_edges[s_i]);
     });
     {
 //       std::thread recv_thread_dst([&]() {
@@ -1296,39 +1378,68 @@ public:
 //           }
 //         }
 //       });
-auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
-                                   int recv_edges) {
-#if 0
-        #pragma omp parallel for
-        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
-          VertexId src = recv_buffer[e_i].src;
-          VertexId dst = recv_buffer[e_i].dst;
-          assert(dst >= partition_offset[partition_id] &&
-                 dst < partition_offset[partition_id + 1]);
-          int dst_part = get_local_partition_id(dst);
-          EdgeId pos =
-              __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
-          outgoing_adj_list[dst_part][pos].neighbour = dst;
-          if (!std::is_same<EdgeData, Empty>::value) {
-            outgoing_adj_list[dst_part][pos].edge_data =
-                recv_buffer[e_i].edge_data;
+      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
+                                         int recv_edges) {
+        std::vector<std::vector<EdgeUnit<EdgeData>>> buckets(sockets);
+        buckets.assign(sockets, std::vector<EdgeUnit<EdgeData>>());
+        const EdgeId PAR_BUCKET_THRESHOLD = 8192;
+        if (recv_edges >= PAR_BUCKET_THRESHOLD && threads > 1) {
+          uint32_t nw = (uint32_t)std::min((size_t)threads, (size_t)recv_edges);
+          std::vector<std::vector<std::vector<EdgeUnit<EdgeData>>>> thread_buckets(nw);
+          for (uint32_t t = 0; t < nw; t++) thread_buckets[t].resize(sockets);
+          Parallel::Invoke([&](uint32_t tid) {
+            size_t chunk = ((size_t)recv_edges + nw - 1) / nw;
+            EdgeId beg = (EdgeId)((size_t)tid * chunk);
+            EdgeId end = (EdgeId)std::min(beg + (EdgeId)chunk, (EdgeId)recv_edges);
+            for (EdgeId e_i = beg; e_i < end; e_i++) {
+              VertexId dst = recv_buffer[e_i].dst;
+              if (dst < partition_offset[partition_id] ||
+                  dst >= partition_offset[partition_id + 1]) continue;
+              int dst_part = get_local_partition_id(dst);
+              if (dst_part < 0 || dst_part >= sockets) continue;
+              thread_buckets[tid][dst_part].push_back(recv_buffer[e_i]);
+            }
+          }, nw);
+          for (int s = 0; s < sockets; s++) {
+            for (uint32_t t = 0; t < nw; t++) {
+              auto &tb = thread_buckets[t][s];
+              buckets[s].insert(buckets[s].end(), tb.begin(), tb.end());
+            }
+          }
+        } else {
+          for (EdgeId e_i = 0; e_i < (EdgeId)recv_edges; e_i++) {
+            VertexId dst = recv_buffer[e_i].dst;
+            if (dst < partition_offset[partition_id] ||
+                dst >= partition_offset[partition_id + 1]) continue;
+            int dst_part = get_local_partition_id(dst);
+            if (dst_part < 0 || dst_part >= sockets) continue;
+            buckets[dst_part].push_back(recv_buffer[e_i]);
           }
         }
-#endif
-        Parallel::For([&](EdgeId e_i) {
-          VertexId src = recv_buffer[e_i].src;
-          VertexId dst = recv_buffer[e_i].dst;
-          assert(dst >= partition_offset[partition_id] &&
-                 dst < partition_offset[partition_id + 1]);
-          int dst_part = get_local_partition_id(dst);
-          EdgeId pos =
-              __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
-          outgoing_adj_list[dst_part][pos].neighbour = dst;
-          if (!std::is_same<EdgeData, Empty>::value) {
-            outgoing_adj_list[dst_part][pos].edge_data =
-                recv_buffer[e_i].edge_data;
-          }
-        }, 0, recv_edges);
+        run_on_loader_threads([&](int s_i) {
+          auto &bucket = buckets[s_i];
+          if (bucket.empty()) return;
+          uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, bucket.size());
+          if (nw == 0) nw = 1;
+          Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+            size_t chunk = (bucket.size() + nw - 1) / nw;
+            size_t beg = (size_t)tid * chunk;
+            size_t end = std::min(beg + chunk, bucket.size());
+            for (size_t idx = beg; idx < end; idx++) {
+              const EdgeUnit<EdgeData> &eu = bucket[idx];
+              VertexId src = eu.src;
+              VertexId dst = eu.dst;
+              assert(dst >= partition_offset[partition_id] &&
+                     dst < partition_offset[partition_id + 1]);
+              EdgeId pos =
+                  __sync_fetch_and_add(&outgoing_adj_index[s_i][src], 1);
+              outgoing_adj_list[s_i][pos].neighbour = dst;
+              if (!std::is_same<EdgeData, Empty>::value) {
+                outgoing_adj_list[s_i][pos].edge_data = eu.edge_data;
+              }
+            }
+          }, 0, nw);
+        });
       };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
@@ -1370,25 +1481,39 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
       // }
       // recv_thread_dst.join();
     }
-    for (int s_i=0;s_i<sockets;s_i++) {
-      for (VertexId p_v_i=0;p_v_i<compressed_outgoing_adj_vertices[s_i];p_v_i++) {
-        VertexId v_i = compressed_outgoing_adj_index[s_i][p_v_i].vertex;
-        outgoing_adj_index[s_i][v_i] = compressed_outgoing_adj_index[s_i][p_v_i].index;
-        outgoing_adj_index[s_i][v_i+1] = compressed_outgoing_adj_index[s_i][p_v_i+1].index;
+    run_on_loader_threads([&](int s_i) {
+      VertexId ncv = compressed_outgoing_adj_vertices[s_i];
+      uint32_t nw2 = (uint32_t)std::min((size_t)threads_per_socket, (size_t)ncv);
+      if (nw2 > 1) {
+        Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+          size_t chunk = ((size_t)ncv + nw2 - 1) / nw2;
+          VertexId p_beg = (VertexId)((size_t)tid * chunk);
+          VertexId p_end = (VertexId)std::min(p_beg + (VertexId)chunk, ncv);
+          for (VertexId p_v_i = p_beg; p_v_i < p_end; p_v_i++) {
+            VertexId v_i = compressed_outgoing_adj_index[s_i][p_v_i].vertex;
+            outgoing_adj_index[s_i][v_i] = compressed_outgoing_adj_index[s_i][p_v_i].index;
+            outgoing_adj_index[s_i][v_i+1] = compressed_outgoing_adj_index[s_i][p_v_i+1].index;
+          }
+        }, 0, nw2);
+      } else {
+        for (VertexId p_v_i = 0; p_v_i < ncv; p_v_i++) {
+          VertexId v_i = compressed_outgoing_adj_index[s_i][p_v_i].vertex;
+          outgoing_adj_index[s_i][v_i] = compressed_outgoing_adj_index[s_i][p_v_i].index;
+          outgoing_adj_index[s_i][v_i+1] = compressed_outgoing_adj_index[s_i][p_v_i+1].index;
+        }
       }
-    }
-    // MPI_Barrier(MPI_COMM_WORLD);
+    });
 
     EdgeId recv_incoming_edges = 0;
     incoming_edges = new EdgeId [sockets];
     incoming_adj_index = new EdgeId* [sockets];
     incoming_adj_list = new AdjUnit<EdgeData>* [sockets];
     incoming_adj_bitmap = new Bitmap * [sockets];
-    for (int s_i=0;s_i<sockets;s_i++) {
+    run_on_loader_threads([&](int s_i) {
       incoming_adj_bitmap[s_i] = new Bitmap (vertices);
       incoming_adj_bitmap[s_i]->clear();
       incoming_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
-    }
+    });
     {
       // std::thread recv_thread_src([&]() {
       //   int finished_count = 0;
@@ -1425,18 +1550,64 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
       // });
       auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
                                          int recv_edges) {
-        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
-          VertexId src = recv_buffer[e_i].src;
-          VertexId dst = recv_buffer[e_i].dst;
-          assert(src >= partition_offset[partition_id] &&
-                 src < partition_offset[partition_id + 1]);
-          int src_part = get_local_partition_id(src);
-          if (!incoming_adj_bitmap[src_part]->get_bit(dst)) {
-            incoming_adj_bitmap[src_part]->set_bit(dst);
-            incoming_adj_index[src_part][dst] = 0;
+        std::vector<std::vector<EdgeUnit<EdgeData>>> buckets(sockets);
+        buckets.assign(sockets, std::vector<EdgeUnit<EdgeData>>());
+        const EdgeId PAR_BUCKET_THRESHOLD = 8192;
+        if (recv_edges >= PAR_BUCKET_THRESHOLD && threads > 1) {
+          uint32_t nw = (uint32_t)std::min((size_t)threads, (size_t)recv_edges);
+          std::vector<std::vector<std::vector<EdgeUnit<EdgeData>>>> thread_buckets(nw);
+          for (uint32_t t = 0; t < nw; t++) thread_buckets[t].resize(sockets);
+          Parallel::Invoke([&](uint32_t tid) {
+            size_t chunk = ((size_t)recv_edges + nw - 1) / nw;
+            EdgeId beg = (EdgeId)((size_t)tid * chunk);
+            EdgeId end = (EdgeId)std::min(beg + (EdgeId)chunk, (EdgeId)recv_edges);
+            for (EdgeId e_i = beg; e_i < end; e_i++) {
+              VertexId src = recv_buffer[e_i].src;
+              if (src < partition_offset[partition_id] ||
+                  src >= partition_offset[partition_id + 1]) continue;
+              int src_part = get_local_partition_id(src);
+              if (src_part < 0 || src_part >= sockets) continue;
+              thread_buckets[tid][src_part].push_back(recv_buffer[e_i]);
+            }
+          }, nw);
+          for (int s = 0; s < sockets; s++) {
+            for (uint32_t t = 0; t < nw; t++) {
+              auto &tb = thread_buckets[t][s];
+              buckets[s].insert(buckets[s].end(), tb.begin(), tb.end());
+            }
           }
-          __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
+        } else {
+          for (EdgeId e_i = 0; e_i < (EdgeId)recv_edges; e_i++) {
+            VertexId src = recv_buffer[e_i].src;
+            if (src < partition_offset[partition_id] ||
+                src >= partition_offset[partition_id + 1]) continue;
+            int src_part = get_local_partition_id(src);
+            if (src_part < 0 || src_part >= sockets) continue;
+            buckets[src_part].push_back(recv_buffer[e_i]);
+          }
         }
+        run_on_loader_threads([&](int s_i) {
+          auto &bucket = buckets[s_i];
+          if (bucket.empty()) return;
+          uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, bucket.size());
+          if (nw == 0) nw = 1;
+          Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+            size_t chunk = (bucket.size() + nw - 1) / nw;
+            size_t beg = (size_t)tid * chunk;
+            size_t end = std::min(beg + chunk, bucket.size());
+            for (size_t idx = beg; idx < end; idx++) {
+              VertexId src = bucket[idx].src;
+              VertexId dst = bucket[idx].dst;
+              assert(src >= partition_offset[partition_id] &&
+                     src < partition_offset[partition_id + 1]);
+              if (!incoming_adj_bitmap[s_i]->get_bit(dst)) {
+                incoming_adj_bitmap[s_i]->set_bit(dst);
+                incoming_adj_index[s_i][dst] = 0;
+              }
+              __sync_fetch_and_add(&incoming_adj_index[s_i][dst], 1);
+            }
+          }, 0, nw);
+        });
         recv_incoming_edges += recv_edges;
       };
       for (int i = 0; i < partitions; i++) {
@@ -1485,14 +1656,31 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
     }
     compressed_incoming_adj_vertices = new VertexId [sockets];
     compressed_incoming_adj_index = new CompressedAdjIndexUnit * [sockets];
-    for (int s_i=0;s_i<sockets;s_i++) {
+    run_on_loader_threads([&](int s_i) {
+      uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, (size_t)vertices);
+      if (nw == 0) nw = 1;
+      std::vector<EdgeId> local_edges(nw, 0);
+      std::vector<VertexId> local_verts(nw, 0);
+      Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+        size_t chunk = ((size_t)vertices + nw - 1) / nw;
+        VertexId beg = (VertexId)((size_t)tid * chunk);
+        VertexId end = (VertexId)std::min(beg + (VertexId)chunk, (VertexId)vertices);
+        EdgeId le = 0;
+        VertexId lv = 0;
+        for (VertexId v_i = beg; v_i < end; v_i++) {
+          if (incoming_adj_bitmap[s_i]->get_bit(v_i)) {
+            le += incoming_adj_index[s_i][v_i];
+            lv += 1;
+          }
+        }
+        local_edges[tid] = le;
+        local_verts[tid] = lv;
+      }, 0, nw);
       incoming_edges[s_i] = 0;
       compressed_incoming_adj_vertices[s_i] = 0;
-      for (VertexId v_i=0;v_i<vertices;v_i++) {
-        if (incoming_adj_bitmap[s_i]->get_bit(v_i)) {
-          incoming_edges[s_i] += incoming_adj_index[s_i][v_i];
-          compressed_incoming_adj_vertices[s_i] += 1;
-        }
+      for (uint32_t t = 0; t < nw; t++) {
+        incoming_edges[s_i] += local_edges[t];
+        compressed_incoming_adj_vertices[s_i] += local_verts[t];
       }
       compressed_incoming_adj_index[s_i] = (CompressedAdjIndexUnit*)malloc( sizeof(CompressedAdjIndexUnit) * (compressed_incoming_adj_vertices[s_i] + 1));
       compressed_incoming_adj_index[s_i][0].index = 0;
@@ -1507,16 +1695,26 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
           compressed_incoming_adj_index[s_i][compressed_incoming_adj_vertices[s_i]].index = last_e_i;
         }
       }
-      for (VertexId p_v_i=0;p_v_i<compressed_incoming_adj_vertices[s_i];p_v_i++) {
-        VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
-        incoming_adj_index[s_i][v_i] = compressed_incoming_adj_index[s_i][p_v_i].index;
-        incoming_adj_index[s_i][v_i+1] = compressed_incoming_adj_index[s_i][p_v_i+1].index;
+      {
+        VertexId ncv = compressed_incoming_adj_vertices[s_i];
+        uint32_t nw2 = (uint32_t)std::min((size_t)threads_per_socket, (size_t)ncv);
+        if (nw2 == 0) nw2 = 1;
+        Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+          size_t chunk = ((size_t)ncv + nw2 - 1) / nw2;
+          VertexId p_beg = (VertexId)((size_t)tid * chunk);
+          VertexId p_end = (VertexId)std::min(p_beg + (VertexId)chunk, ncv);
+          for (VertexId p_v_i = p_beg; p_v_i < p_end; p_v_i++) {
+            VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
+            incoming_adj_index[s_i][v_i] = compressed_incoming_adj_index[s_i][p_v_i].index;
+            incoming_adj_index[s_i][v_i+1] = compressed_incoming_adj_index[s_i][p_v_i+1].index;
+          }
+        }, 0, nw2);
       }
       #ifdef PRINT_DEBUG_MESSAGES
       printf("part(%d) E_%d has %lu dense mode edges\n", partition_id, s_i, incoming_edges[s_i]);
       #endif
       incoming_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * incoming_edges[s_i]);
-    }
+    });
     {
 //       std::thread recv_thread_src([&]() {
 //         int finished_count = 0;
@@ -1550,39 +1748,68 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
 //           }
 //         }
 //       });
-auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
-                                   int recv_edges) {
-#if 0
-#pragma omp parallel for
-        for (EdgeId e_i = 0; e_i < recv_edges; e_i++) {
-          VertexId src = recv_buffer[e_i].src;
-          VertexId dst = recv_buffer[e_i].dst;
-          assert(src >= partition_offset[partition_id] &&
-                 src < partition_offset[partition_id + 1]);
-          int src_part = get_local_partition_id(src);
-          EdgeId pos =
-              __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
-          incoming_adj_list[src_part][pos].neighbour = src;
-          if (!std::is_same<EdgeData, Empty>::value) {
-            incoming_adj_list[src_part][pos].edge_data =
-                recv_buffer[e_i].edge_data;
+      auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
+                                         int recv_edges) {
+        std::vector<std::vector<EdgeUnit<EdgeData>>> buckets(sockets);
+        buckets.assign(sockets, std::vector<EdgeUnit<EdgeData>>());
+        const EdgeId PAR_BUCKET_THRESHOLD = 8192;
+        if (recv_edges >= PAR_BUCKET_THRESHOLD && threads > 1) {
+          uint32_t nw = (uint32_t)std::min((size_t)threads, (size_t)recv_edges);
+          std::vector<std::vector<std::vector<EdgeUnit<EdgeData>>>> thread_buckets(nw);
+          for (uint32_t t = 0; t < nw; t++) thread_buckets[t].resize(sockets);
+          Parallel::Invoke([&](uint32_t tid) {
+            size_t chunk = ((size_t)recv_edges + nw - 1) / nw;
+            EdgeId beg = (EdgeId)((size_t)tid * chunk);
+            EdgeId end = (EdgeId)std::min(beg + (EdgeId)chunk, (EdgeId)recv_edges);
+            for (EdgeId e_i = beg; e_i < end; e_i++) {
+              VertexId src = recv_buffer[e_i].src;
+              if (src < partition_offset[partition_id] ||
+                  src >= partition_offset[partition_id + 1]) continue;
+              int src_part = get_local_partition_id(src);
+              if (src_part < 0 || src_part >= sockets) continue;
+              thread_buckets[tid][src_part].push_back(recv_buffer[e_i]);
+            }
+          }, nw);
+          for (int s = 0; s < sockets; s++) {
+            for (uint32_t t = 0; t < nw; t++) {
+              auto &tb = thread_buckets[t][s];
+              buckets[s].insert(buckets[s].end(), tb.begin(), tb.end());
+            }
+          }
+        } else {
+          for (EdgeId e_i = 0; e_i < (EdgeId)recv_edges; e_i++) {
+            VertexId src = recv_buffer[e_i].src;
+            if (src < partition_offset[partition_id] ||
+                src >= partition_offset[partition_id + 1]) continue;
+            int src_part = get_local_partition_id(src);
+            if (src_part < 0 || src_part >= sockets) continue;
+            buckets[src_part].push_back(recv_buffer[e_i]);
           }
         }
-#endif
-        Parallel::For([&](EdgeId e_i) {
-          VertexId src = recv_buffer[e_i].src;
-          VertexId dst = recv_buffer[e_i].dst;
-          assert(src >= partition_offset[partition_id] &&
-                 src < partition_offset[partition_id + 1]);
-          int src_part = get_local_partition_id(src);
-          EdgeId pos =
-              __sync_fetch_and_add(&incoming_adj_index[src_part][dst], 1);
-          incoming_adj_list[src_part][pos].neighbour = src;
-          if (!std::is_same<EdgeData, Empty>::value) {
-            incoming_adj_list[src_part][pos].edge_data =
-                recv_buffer[e_i].edge_data;
-          }
-        }, 0, recv_edges);
+        run_on_loader_threads([&](int s_i) {
+          auto &bucket = buckets[s_i];
+          if (bucket.empty()) return;
+          uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, bucket.size());
+          if (nw == 0) nw = 1;
+          Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+            size_t chunk = (bucket.size() + nw - 1) / nw;
+            size_t beg = (size_t)tid * chunk;
+            size_t end = std::min(beg + chunk, bucket.size());
+            for (size_t idx = beg; idx < end; idx++) {
+              const EdgeUnit<EdgeData> &eu = bucket[idx];
+              VertexId src = eu.src;
+              VertexId dst = eu.dst;
+              assert(src >= partition_offset[partition_id] &&
+                     src < partition_offset[partition_id + 1]);
+              EdgeId pos =
+                  __sync_fetch_and_add(&incoming_adj_index[s_i][dst], 1);
+              incoming_adj_list[s_i][pos].neighbour = src;
+              if (!std::is_same<EdgeData, Empty>::value) {
+                incoming_adj_list[s_i][pos].edge_data = eu.edge_data;
+              }
+            }
+          }, 0, nw);
+        });
       };
       for (int i=0;i<partitions;i++) {
         buffered_edges[i] = 0;
@@ -1624,14 +1851,28 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
       // }
       // recv_thread_src.join();
     }
-    for (int s_i=0;s_i<sockets;s_i++) {
-      for (VertexId p_v_i=0;p_v_i<compressed_incoming_adj_vertices[s_i];p_v_i++) {
-        VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
-        incoming_adj_index[s_i][v_i] = compressed_incoming_adj_index[s_i][p_v_i].index;
-        incoming_adj_index[s_i][v_i+1] = compressed_incoming_adj_index[s_i][p_v_i+1].index;
+    run_on_loader_threads([&](int s_i) {
+      VertexId ncv = compressed_incoming_adj_vertices[s_i];
+      uint32_t nw2 = (uint32_t)std::min((size_t)threads_per_socket, (size_t)ncv);
+      if (nw2 > 1) {
+        Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+          size_t chunk = ((size_t)ncv + nw2 - 1) / nw2;
+          VertexId p_beg = (VertexId)((size_t)tid * chunk);
+          VertexId p_end = (VertexId)std::min(p_beg + (VertexId)chunk, ncv);
+          for (VertexId p_v_i = p_beg; p_v_i < p_end; p_v_i++) {
+            VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
+            incoming_adj_index[s_i][v_i] = compressed_incoming_adj_index[s_i][p_v_i].index;
+            incoming_adj_index[s_i][v_i+1] = compressed_incoming_adj_index[s_i][p_v_i+1].index;
+          }
+        }, 0, nw2);
+      } else {
+        for (VertexId p_v_i = 0; p_v_i < ncv; p_v_i++) {
+          VertexId v_i = compressed_incoming_adj_index[s_i][p_v_i].vertex;
+          incoming_adj_index[s_i][v_i] = compressed_incoming_adj_index[s_i][p_v_i].index;
+          incoming_adj_index[s_i][v_i+1] = compressed_incoming_adj_index[s_i][p_v_i+1].index;
+        }
       }
-    }
-    // MPI_Barrier(MPI_COMM_WORLD);
+    });
 
     delete [] buffered_edges;
     delete [] send_buffer;
@@ -1715,6 +1956,33 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
           remained_edges -= got_edges;
         }
       }
+#ifdef PRINT_CHUNKS_INFO
+    printf("[PR][part=%d] CHUNK ALLOCATION (tuned_chunks_dense):\n", partition_id);
+    printf("[PR][part=%d]   partition_offset: [", partition_id);
+    for (int p = 0; p <= partitions; ++p) printf("%u%s", partition_offset[p], p < partitions ? "," : "]\n");
+    printf("[PR][part=%d]   local_partition_offset: [", partition_id);
+    for (int s = 0; s <= sockets; ++s) printf("%u%s", local_partition_offset[s], s < sockets ? "," : "]\n");
+    for (int p = 0; p < partitions; ++p) {
+      printf("[PR][part=%d]   partition %d (machine %d): vertex_range=[%u,%u), compressed_incoming_vertices=%u\n",
+             partition_id, p, p, partition_offset[p], partition_offset[p+1], compressed_incoming_adj_vertices[p]);
+      int workers = 0;
+      for (int t_i = 0; t_i < threads; t_i++) {
+        VertexId c = tuned_chunks_dense[p][t_i].curr;
+        VertexId e = tuned_chunks_dense[p][t_i].end;
+        if (e <= c) continue;
+        workers++;
+        EdgeId edges = 0;
+        for (VertexId p_v_i = c; p_v_i < e; p_v_i++) {
+          edges += compressed_incoming_adj_index[p][p_v_i + 1].index -
+                   compressed_incoming_adj_index[p][p_v_i].index;
+        }
+        printf("[PR][part=%d]     thread %d (socket %d): pv_range=[%u,%u), approx_edges=%lu\n",
+               partition_id, t_i, get_socket_id(t_i), c, e, (unsigned long)edges);
+      }
+      printf("[PR][part=%d]     -> %d workers on partition %d (machine %d)\n", partition_id, workers, p, p);
+    }
+    printf("[PR][part=%d] CHUNK ALLOCATION END\n", partition_id);
+#endif
     }
   }
 
@@ -2230,7 +2498,14 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
               }
             }
           };
+          
+          double dense_pull_invoke_time = 0;
+          dense_pull_invoke_time -= get_time();
           Parallel::Invoke(func, threads);
+          dense_pull_invoke_time += get_time();
+          if (partition_id == 0) {
+            printf("[profile][dense_pull_invoke] time=%lf(s)\n", dense_pull_invoke_time);
+          }
         }
       }
       

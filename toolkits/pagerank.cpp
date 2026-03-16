@@ -27,13 +27,104 @@ Copyright (c) 2014-2015 Xiaowei Zhu, Tsinghua University
 
 const double d = (double)0.85;
 
+void print_data_structure(Graph<Empty> * graph) {
+  printf("[PR][part=%d] curr: [%p-%p) next: [%p-%p) active_data: [%p-%p) out_degree: [%p-%p) in_degree: [%p-%p) partition_offset: [%p-%p) local_partition_offset: [%p-%p)",
+    graph->partition_id,
+    (void *)curr, (void *)((char *)curr + graph->vertices * sizeof(double)),
+    (void *)next, (void *)((char *)next + graph->vertices * sizeof(double)),
+    (void *)active->data, (void *)((char *)active->data + graph->vertices * sizeof(VertexId)),
+    /* For global out_degree/in_degree, print the range of socket 0 (if any). */
+    (void *)(graph->sockets > 0 ? (void *)graph->out_degree_by_socket[0] : nullptr),
+    (void *)(graph->sockets > 0
+               ? (void *)((char *)graph->out_degree_by_socket[0]
+                          + (graph->local_partition_offset[1] - graph->local_partition_offset[0]) * sizeof(VertexId))
+               : nullptr),
+    (void *)(graph->sockets > 0 ? (void *)graph->in_degree_by_socket[0] : nullptr),
+    (void *)(graph->sockets > 0
+               ? (void *)((char *)graph->in_degree_by_socket[0]
+                          + (graph->local_partition_offset[1] - graph->local_partition_offset[0]) * sizeof(VertexId))
+               : nullptr),
+    (void *)graph->partition_offset,
+    (void *)((char *)graph->partition_offset + (graph->partitions + 1) * sizeof(VertexId)),
+    (void *)graph->local_partition_offset,
+    (void *)((char *)graph->local_partition_offset + (graph->sockets + 1) * sizeof(VertexId)));
+  for (int s_i = 0; s_i < graph->sockets; s_i++) {
+    VertexId local_start = graph->local_partition_offset[s_i];
+    VertexId local_end = graph->local_partition_offset[s_i + 1];
+    VertexId local_count = (local_end > local_start) ? (local_end - local_start) : 0;
+    printf(" out_degree_local[%d]=[%p-%p) in_degree_local[%d]=[%p-%p) outgoing_adj_index[%d]=[%p-%p) outgoing_adj_list[%d]=[%p-%p) outgoing_adj_bitmap[%d]=[%p-%p)"
+           " incoming_adj_index[%d]=[%p-%p) incoming_adj_list[%d]=[%p-%p) incoming_adj_bitmap[%d]=[%p-%p)"
+           " compressed_incoming_adj_index[%d]=[%p-%p) compressed_outgoing_adj_index[%d]=[%p-%p)",
+           s_i,
+           (void *)(graph->out_degree_by_socket ? (void *)graph->out_degree_by_socket[s_i] : nullptr),
+           (void *)(graph->out_degree_by_socket && local_count > 0
+                      ? (void *)((char *)graph->out_degree_by_socket[s_i] + local_count * sizeof(VertexId))
+                      : nullptr),
+           s_i,
+           (void *)(graph->in_degree_by_socket ? (void *)graph->in_degree_by_socket[s_i] : nullptr),
+           (void *)(graph->in_degree_by_socket && local_count > 0
+                      ? (void *)((char *)graph->in_degree_by_socket[s_i] + local_count * sizeof(VertexId))
+                      : nullptr),
+           s_i,
+           (void *)graph->outgoing_adj_index[s_i],
+           (void *)((char *)graph->outgoing_adj_index[s_i] + (graph->vertices + 1) * sizeof(EdgeId)),
+           s_i,
+           (void *)graph->outgoing_adj_list[s_i],
+           (void *)((char *)graph->outgoing_adj_list[s_i]
+                    + (long)graph->outgoing_edges[s_i] * graph->unit_size),
+           s_i,
+           (void *)graph->outgoing_adj_bitmap[s_i],
+           (void *)((char *)graph->outgoing_adj_bitmap[s_i] + graph->vertices * sizeof(VertexId)),
+           s_i,
+           (void *)(graph->incoming_adj_index ? (void *)graph->incoming_adj_index[s_i] : nullptr),
+           (void *)(graph->incoming_adj_index
+                      ? (void *)((char *)graph->incoming_adj_index[s_i] + (graph->vertices + 1) * sizeof(EdgeId))
+                      : nullptr),
+           s_i,
+           (void *)(graph->incoming_adj_list ? (void *)graph->incoming_adj_list[s_i] : nullptr),
+           (void *)(graph->incoming_adj_list
+                      ? (void *)((char *)graph->incoming_adj_list[s_i]
+                                 + (long)graph->incoming_edges[s_i] * graph->unit_size)
+                      : nullptr),
+           s_i,
+           (void *)(graph->incoming_adj_bitmap ? (void *)graph->incoming_adj_bitmap[s_i] : nullptr),
+           (void *)(graph->incoming_adj_bitmap
+                      ? (void *)((char *)graph->incoming_adj_bitmap[s_i] + graph->vertices * sizeof(VertexId))
+                      : nullptr),
+           s_i,
+           (void *)(graph->compressed_incoming_adj_index ? (void *)graph->compressed_incoming_adj_index[s_i] : nullptr),
+           (void *)(graph->compressed_incoming_adj_index
+                      ? (void *)((char *)graph->compressed_incoming_adj_index[s_i]
+                                 + (graph->compressed_incoming_adj_vertices[s_i] + 1)
+                                   * sizeof(CompressedAdjIndexUnit))
+                      : nullptr),
+           s_i,
+           (void *)(graph->compressed_outgoing_adj_index ? (void *)graph->compressed_outgoing_adj_index[s_i] : nullptr),
+           (void *)(graph->compressed_outgoing_adj_index
+                      ? (void *)((char *)graph->compressed_outgoing_adj_index[s_i]
+                                 + (graph->compressed_outgoing_adj_vertices[s_i] + 1)
+                                   * sizeof(CompressedAdjIndexUnit))
+                      : nullptr));
+  }
+  printf("\n");
+}
+
 void compute(Graph<Empty> * graph, int iterations) {
+  usys_print_vmspace_stats();
   double exec_time = 0;
   exec_time -= get_time();
 
   double * curr = graph->alloc_vertex_array<double>();
   double * next = graph->alloc_vertex_array<double>();
   VertexSubset * active = graph->alloc_vertex_subset();
+#ifdef PRINT_DATA_STRUCTURE
+  printf("[PR][part=%d] curr: [%p-%p) next: [%p-%p) active_data: [%p-%p) ",
+    graph->partition_id,
+    (void *)curr, (void *)((char *)curr + graph->vertices * sizeof(double)),
+    (void *)next, (void *)((char *)next + graph->vertices * sizeof(double)),
+    (void *)active->data, (void *)((char *)active->data + graph->vertices * sizeof(VertexId)));
+  print_data_structure(graph);
+#endif
   active->fill();
 
   double delta = graph->process_vertices<double>(
@@ -127,6 +218,8 @@ void compute(Graph<Empty> * graph, int iterations) {
     printf("pr[%u]=%lf\n", max_v_i, curr[max_v_i]);
   }
 
+  usys_print_vmspace_stats();
+
   graph->dealloc_vertex_array(curr);
   graph->dealloc_vertex_array(next);
   delete active;
@@ -188,9 +281,7 @@ int main(int argc, char ** argv) {
   Parallel::SetThreadCount(thread_count2);
 #endif
   for (int run=0;run<1;run++) {
-    usys_print_vmspace_stats();
     compute(graph, iterations);
-    usys_print_vmspace_stats();
   }
 
   delete graph;

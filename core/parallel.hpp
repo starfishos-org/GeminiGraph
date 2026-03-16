@@ -419,6 +419,36 @@ public:
         completion_condition.wait(lock, [&remaining_tasks] { return remaining_tasks == 0; });
     }
 
+    /* InvokeOnMachine: enqueue `count` tasks to the given machine; task j runs
+     * func(start_thread_id + j). Blocks until all complete. E.g. run 8 threads
+     * on machine 0: InvokeOnMachine(0, func, 0, 8). */
+    template <typename Func>
+    static void InvokeOnMachine(uint32_t machine_id, Func func,
+                                uint32_t start_thread_id, uint32_t count) {
+        if (count == 0) return;
+        std::atomic<uint32_t> remaining_tasks(count);
+        std::mutex completion_mutex;
+        std::condition_variable completion_condition;
+        uint32_t num_machines = get_num_machines();
+        if (num_machines == 0) num_machines = 1;
+        if (machine_id >= num_machines) machine_id = num_machines - 1;
+        for (uint32_t j = 0; j < count; j++) {
+            uint32_t tid = start_thread_id + j;
+            enqueue_to_machine_impl(machine_id,
+                [&func, &remaining_tasks, &completion_mutex, &completion_condition, tid]() {
+                    func(tid);
+                    if (--remaining_tasks == 0) {
+                        std::lock_guard<std::mutex> lock(completion_mutex);
+                        completion_condition.notify_one();
+                    }
+                });
+        }
+        std::unique_lock<std::mutex> lock(completion_mutex);
+        completion_condition.wait(lock, [&remaining_tasks, count]() {
+            return remaining_tasks == 0;
+        });
+    }
+
     template <typename Func> static void Invoke(Func func, uint32_t threads)
     {
         std::atomic<uint32_t> remaining_tasks(threads);
@@ -452,7 +482,8 @@ public:
 
     template <typename Func>
     static void For(Func func, uint64_t start, uint64_t end, uint64_t incr = 1,
-                    int64_t user_defined_chunk_size = -1)
+                    int64_t user_defined_chunk_size = -1,
+                    int fixed_machine_id = -1)
     {
         DEBUG_PRINT("Entering for, time: %lu\n", rdtsc());
         uint64_t chunk_size;
@@ -480,10 +511,15 @@ public:
             uint64_t per_thread_end =
                     std::min(per_thread_start + chunk_size * incr, end);
 
-            uint32_t machine_id = (num_machines > 0 && tps_for > 0)
-                ? (static_cast<uint32_t>(i) / tps_for) : 0;
-            if (machine_id >= num_machines && num_machines > 0)
-                machine_id = num_machines - 1;
+            uint32_t machine_id;
+            if (fixed_machine_id >= 0 && (uint32_t)fixed_machine_id < num_machines) {
+                machine_id = (uint32_t)fixed_machine_id;
+            } else {
+                machine_id = (num_machines > 0 && tps_for > 0)
+                    ? (static_cast<uint32_t>(i) / tps_for) : 0;
+                if (machine_id >= num_machines && num_machines > 0)
+                    machine_id = num_machines - 1;
+            }
 
             auto task = [=, &func, &remaining_tasks, &completion_mutex, &completion_condition] {
                 for (uint64_t j = per_thread_start; j < per_thread_end; j += incr)
