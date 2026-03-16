@@ -21,6 +21,9 @@ Copyright (c) 2014-2015 Xiaowei Zhu, Tsinghua University
 #include "core/graph.hpp"
 
 #include <math.h>
+#ifdef OS_CHCORE
+#include <chcore/syscall.h>
+#endif
 
 const double d = (double)0.85;
 
@@ -36,8 +39,8 @@ void compute(Graph<Empty> * graph, int iterations) {
   double delta = graph->process_vertices<double>(
     [&](VertexId vtx){
       curr[vtx] = (double)1;
-      if (graph->out_degree[vtx]>0) {
-        curr[vtx] /= graph->out_degree[vtx];
+      if (graph->get_out_degree(vtx)>0) {
+        curr[vtx] /= graph->get_out_degree(vtx);
       }
       return (double)1;
     },
@@ -87,9 +90,9 @@ void compute(Graph<Empty> * graph, int iterations) {
       delta = graph->process_vertices<double>(
         [&](VertexId vtx) {
           next[vtx] = 1 - d + d * next[vtx];
-          if (graph->out_degree[vtx]>0) {
-            next[vtx] /= graph->out_degree[vtx];
-            return fabs(next[vtx] - curr[vtx]) * graph->out_degree[vtx];
+          if (graph->get_out_degree(vtx)>0) {
+            next[vtx] /= graph->get_out_degree(vtx);
+            return fabs(next[vtx] - curr[vtx]) * graph->get_out_degree(vtx);
           }
           return fabs(next[vtx] - curr[vtx]);
         },
@@ -146,37 +149,48 @@ void bind_cpu(uint32_t cpu_id) {
     }
 
 int main(int argc, char ** argv) {
-  // MPI_Instance mpi(&argc, &argv);
-
   if (argc < 4) {
     fprintf(stderr, "Usage: %s <file> <vertices> <iterations> [stage1 threads] [stage2 threads]\n", argv[0]);
-    fprintf(stderr, "  <file>: Path to the graph file (required).\n");
-    fprintf(stderr, "  <vertices>: Number of vertices in the graph (required).\n");
-    fprintf(stderr, "  <iterations>: Number of PageRank iterations (required).\n");
-    fprintf(stderr, "  [stage1 threads]: Number of threads for stage 1 (optional, default: hardware concurrency).\n");
-    fprintf(stderr, "  [stage2 threads]: Number of threads for stage 2 (optional, default: same as stage 1).\n");
+    fprintf(stderr, "  (Linux) Or for ChCore: <file> <vertices> <iterations> [machines]\n");
+    fprintf(stderr, "  [machines]: For ChCore, limit to first N machine segments from gemini_bind_cpu.txt (0=use all).\n");
     exit(EXIT_FAILURE);
   }
 
-  bind_cpu(0);
-
   Graph<Empty> *graph;
 
+#ifdef OS_CHCORE
+  uint32_t requested_machines = (argc >= 5) ? (uint32_t)std::atoi(argv[4]) : 0;
+  if (Parallel::LoadBindCpuFile("gemini_bind_cpu.txt") != 0) {
+    fprintf(stderr, "error: must provide gemini_bind_cpu.txt (e.g. 0-7,12-19)\n");
+    exit(EXIT_FAILURE);
+  }
+  if (requested_machines > 0)
+    Parallel::LimitMachines(requested_machines);
+
+  int main_cpu = ThreadPool::bind_cpu_list.empty() ? 0 : ThreadPool::bind_cpu_list[0];
+  usys_set_affinity(-2, main_cpu);
+
+  uint32_t thread_count = (uint32_t)ThreadPool::bind_cpu_list.size();
+  Parallel::SetThreadCount(thread_count);
+  graph = new Graph<Empty>(Graph<Empty>::FromBindCpuList());
+#else
+  bind_cpu(0);
   uint32_t thread_count1 = (argc > 4) ? std::atoi(argv[4]) : std::thread::hardware_concurrency();
   uint32_t thread_count2 = (argc > 5) ? std::atoi(argv[5]) : thread_count1;
-
-
   Parallel::SetThreadCount(thread_count1);
-  
   graph = new Graph<Empty>(thread_count2);
+#endif
+
   graph->load_directed(argv[1], std::atoi(argv[2]));
   int iterations = std::atoi(argv[3]);
 
+#ifndef OS_CHCORE
   Parallel::SetThreadCount(thread_count2);
-
-  compute(graph, iterations);
-  for (int run=0;run<5;run++) {
+#endif
+  for (int run=0;run<1;run++) {
+    usys_print_vmspace_stats();
     compute(graph, iterations);
+    usys_print_vmspace_stats();
   }
 
   delete graph;

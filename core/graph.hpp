@@ -41,6 +41,12 @@ Copyright (c) 2015-2016 Xiaowei Zhu, Tsinghua University
 #include "core/time.hpp"
 #include "core/type.hpp"
 #include "parallel.hpp"
+#ifdef OS_CHCORE
+#include <chcore/syscall.h>
+extern "C" {
+  extern int usys_print_vmspace_stats(void);
+}
+#endif
 
 enum ThreadStatus {
   WORKING,
@@ -108,8 +114,8 @@ public:
   bool symmetric;
   VertexId vertices;
   EdgeId edges;
-  VertexId * out_degree; // VertexId [vertices]; numa-aware
-  VertexId * in_degree; // VertexId [vertices]; numa-aware
+  VertexId ** out_degree_by_socket; // VertexId [sockets][local_range]; numa-aware per socket
+  VertexId ** in_degree_by_socket;  // VertexId [sockets][local_range]; numa-aware per socket
 
   VertexId * partition_offset; // VertexId [partitions+1]
   VertexId * local_partition_offset; // VertexId [sockets+1]
@@ -153,12 +159,57 @@ public:
     init();
   }
 
+  struct FromBindCpuList {};
+  /* OS_CHCORE: Single partition (partition_id=0, partitions=1). Machines become NUMA/sockets.
+   * threads = bind_cpu_list.size(), sockets = loader_cpu_list.size(). */
+  Graph(FromBindCpuList) {
+    partition_id = 0;
+    partitions = 1;
+#ifdef OS_CHCORE
+    int num_sockets = (int)ThreadPool::loader_cpu_list.size();
+    if (num_sockets <= 0)
+      num_sockets = 1;
+    sockets = num_sockets;
+#else
+    sockets = 1;
+#endif
+    threads = (int)ThreadPool::bind_cpu_list.size();
+    if (threads <= 0)
+      threads = 1;
+    threads_per_socket = (sockets > 0 && threads >= sockets) ? (threads / sockets) : threads;
+    init();
+  }
+
   inline int get_socket_id(int thread_id) {
     return thread_id / threads_per_socket;
   }
 
   inline int get_socket_offset(int thread_id) {
     return thread_id % threads_per_socket;
+  }
+
+  /* NUMA-aware accessors for out_degree/in_degree (per-socket arrays). */
+  inline VertexId get_out_degree(VertexId v) const {
+    int s = get_local_partition_id(v);
+    return out_degree_by_socket[s][v - local_partition_offset[s]];
+  }
+  inline VertexId get_in_degree(VertexId v) const {
+    int s = get_local_partition_id(v);
+    return in_degree_by_socket[s][v - local_partition_offset[s]];
+  }
+  inline VertexId * get_out_degree_ptr(VertexId v) {
+    int s = get_local_partition_id(v);
+    return &out_degree_by_socket[s][v - local_partition_offset[s]];
+  }
+  inline VertexId * get_in_degree_ptr(VertexId v) {
+    int s = get_local_partition_id(v);
+    return &in_degree_by_socket[s][v - local_partition_offset[s]];
+  }
+
+  /* Run func(s_i) on each machine; uses Parallel::InvokePerMachine for NUMA-local execution. */
+  void run_on_loader_threads(std::function<void(int s_i)> func) {
+    if (sockets <= 0) return;
+    Parallel::InvokePerMachine([&func](uint32_t m) { func((int)m); });
   }
 
   void init() {
@@ -347,7 +398,7 @@ public:
     assert(false);
   }
 
-  int get_local_partition_id(VertexId v_i){
+  int get_local_partition_id(VertexId v_i) const {
     for (int s_i=0;s_i<sockets;s_i++) {
       if (v_i >= local_partition_offset[s_i] && v_i < local_partition_offset[s_i+1]) {
         return s_i;
@@ -384,10 +435,29 @@ public:
     int fin = open(path.c_str(), O_RDONLY);
     EdgeUnit<EdgeData> * read_edge_buffer = new EdgeUnit<EdgeData> [CHUNKSIZE];
 
-    out_degree = alloc_interleaved_vertex_array<VertexId>();
-    for (VertexId v_i=0;v_i<vertices;v_i++) {
-      out_degree[v_i] = 0;
+    // NUMA-aware: prelim partition by sockets for bootstrap (same as load_directed)
+    std::vector<VertexId> prelim_local_partition_offset_ud(sockets + 1);
+    for (int s_i = 0; s_i <= sockets; s_i++) {
+      prelim_local_partition_offset_ud[s_i] = (VertexId)s_i * vertices / sockets;
     }
+    std::vector<VertexId*> out_degree_prelim_ud(sockets);
+    run_on_loader_threads([&](int s_i) {
+      VertexId count = prelim_local_partition_offset_ud[s_i + 1] - prelim_local_partition_offset_ud[s_i];
+      out_degree_prelim_ud[s_i] = (VertexId*)malloc(sizeof(VertexId) * count);
+      for (VertexId v_i = 0; v_i < count; v_i++) {
+        out_degree_prelim_ud[s_i][v_i] = 0;
+      }
+    });
+    auto get_prelim_out_degree_ptr_ud = [&](VertexId v) -> VertexId* {
+      int s = (vertices > 0) ? (int)((uint64_t)v * sockets / vertices) : 0;
+      if (s >= sockets) s = sockets - 1;
+      return &out_degree_prelim_ud[s][v - prelim_local_partition_offset_ud[s]];
+    };
+    auto get_prelim_out_degree_ud = [&](VertexId v) -> VertexId {
+      int s = (vertices > 0) ? (int)((uint64_t)v * sockets / vertices) : 0;
+      if (s >= sockets) s = sockets - 1;
+      return out_degree_prelim_ud[s][v - prelim_local_partition_offset_ud[s]];
+    };
     assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
     read_bytes = 0;
     while (read_bytes < bytes_to_read) {
@@ -400,15 +470,13 @@ public:
       assert(curr_read_bytes>=0);
       read_bytes += curr_read_bytes;
       EdgeId curr_read_edges = curr_read_bytes / edge_unit_size;
-      // #pragma omp parallel for
-      for (EdgeId e_i=0;e_i<curr_read_edges;e_i++) {
+      Parallel::For([&](EdgeId e_i) {
         VertexId src = read_edge_buffer[e_i].src;
         VertexId dst = read_edge_buffer[e_i].dst;
-        __sync_fetch_and_add(&out_degree[src], 1);
-        __sync_fetch_and_add(&out_degree[dst], 1);
-      }
+        __sync_fetch_and_add(get_prelim_out_degree_ptr_ud(src), 1);
+        __sync_fetch_and_add(get_prelim_out_degree_ptr_ud(dst), 1);
+      }, 0, curr_read_edges);
     }
-    // MPI_Allreduce(MPI_IN_PLACE, out_degree, vertices, vid_t, MPI_SUM, MPI_COMM_WORLD);
 
     // locality-aware chunking
     partition_offset = new VertexId [partitions + 1];
@@ -422,7 +490,7 @@ public:
       } else {
         EdgeId got_edges = 0;
         for (VertexId v_i=partition_offset[i];v_i<vertices;v_i++) {
-          got_edges += out_degree[v_i] + alpha;
+          got_edges += get_prelim_out_degree_ud(v_i) + alpha;
           if (got_edges > expected_chunk_size) {
             partition_offset[i+1] = v_i;
             break;
@@ -431,7 +499,7 @@ public:
         partition_offset[i+1] = (partition_offset[i+1]) / PAGESIZE * PAGESIZE; // aligned with pages
       }
       for (VertexId v_i=partition_offset[i];v_i<partition_offset[i+1];v_i++) {
-        remained_amount -= out_degree[v_i] + alpha;
+        remained_amount -= get_prelim_out_degree_ud(v_i) + alpha;
       }
     }
     assert(partition_offset[partitions]==vertices);
@@ -451,7 +519,7 @@ public:
       for (int i=0;i<partitions;i++) {
         EdgeId part_out_edges = 0;
         for (VertexId v_i=partition_offset[i];v_i<partition_offset[i+1];v_i++) {
-          part_out_edges += out_degree[v_i];
+          part_out_edges += get_prelim_out_degree_ud(v_i);
         }
         printf("|V'_%d| = %u |E_%d| = %lu\n", i, partition_offset[i+1] - partition_offset[i], i, part_out_edges);
       }
@@ -464,7 +532,7 @@ public:
       local_partition_offset = new VertexId [sockets + 1];
       EdgeId part_out_edges = 0;
       for (VertexId v_i=partition_offset[partition_id];v_i<partition_offset[partition_id+1];v_i++) {
-        part_out_edges += out_degree[v_i];
+        part_out_edges += get_prelim_out_degree_ud(v_i);
       }
       local_partition_offset[0] = partition_offset[partition_id];
       EdgeId remained_amount = part_out_edges + EdgeId(owned_vertices) * alpha;
@@ -476,7 +544,7 @@ public:
         } else {
           EdgeId got_edges = 0;
           for (VertexId v_i=local_partition_offset[s_i];v_i<partition_offset[partition_id+1];v_i++) {
-            got_edges += out_degree[v_i] + alpha;
+            got_edges += get_prelim_out_degree_ud(v_i) + alpha;
             if (got_edges > expected_chunk_size) {
               local_partition_offset[s_i+1] = v_i;
               break;
@@ -486,8 +554,8 @@ public:
         }
         EdgeId sub_part_out_edges = 0;
         for (VertexId v_i=local_partition_offset[s_i];v_i<local_partition_offset[s_i+1];v_i++) {
-          remained_amount -= out_degree[v_i] + alpha;
-          sub_part_out_edges += out_degree[v_i];
+          remained_amount -= get_prelim_out_degree_ud(v_i) + alpha;
+          sub_part_out_edges += get_prelim_out_degree_ud(v_i);
         }
         #ifdef PRINT_DEBUG_MESSAGES
         printf("|V'_%d_%d| = %u |E_%d| = %lu\n", partition_id, s_i, local_partition_offset[s_i+1] - local_partition_offset[s_i], partition_id, sub_part_out_edges);
@@ -495,13 +563,22 @@ public:
       }
     }
 
-    VertexId * filtered_out_degree = alloc_vertex_array<VertexId>();
-    for (VertexId v_i=partition_offset[partition_id];v_i<partition_offset[partition_id+1];v_i++) {
-      filtered_out_degree[v_i] = out_degree[v_i];
+    // NUMA-aware: symmetric graph: in_degree = out_degree, each socket allocates and copies from prelim
+    out_degree_by_socket = new VertexId* [sockets];
+    run_on_loader_threads([&](int s_i) {
+      VertexId count = local_partition_offset[s_i + 1] - local_partition_offset[s_i];
+      out_degree_by_socket[s_i] = (VertexId*)malloc(sizeof(VertexId) * count);
+      for (VertexId i = 0; i < count; i++) {
+        VertexId v = local_partition_offset[s_i] + i;
+        int ps = (vertices > 0) ? (int)((uint64_t)v * sockets / vertices) : 0;
+        if (ps >= sockets) ps = sockets - 1;
+        out_degree_by_socket[s_i][i] = out_degree_prelim_ud[ps][v - prelim_local_partition_offset_ud[ps]];
+      }
+    });
+    for (int s_i = 0; s_i < sockets; s_i++) {
+      free(out_degree_prelim_ud[s_i]);
     }
-    free(out_degree);
-    out_degree = filtered_out_degree;
-    in_degree = out_degree;
+    in_degree_by_socket = out_degree_by_socket;  // symmetric: in_degree = out_degree
 
     int * buffered_edges = new int [partitions];
     std::vector<char> * send_buffer = new std::vector<char> [partitions];
@@ -516,11 +593,11 @@ public:
     outgoing_adj_index = new EdgeId* [sockets];
     outgoing_adj_list = new AdjUnit<EdgeData>* [sockets];
     outgoing_adj_bitmap = new Bitmap * [sockets];
-    for (int s_i=0;s_i<sockets;s_i++) {
+    run_on_loader_threads([&](int s_i) {
       outgoing_adj_bitmap[s_i] = new Bitmap (vertices);
       outgoing_adj_bitmap[s_i]->clear();
       outgoing_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
-    }
+    });
     {
       // std::thread recv_thread_dst([&]() {
       //   int finished_count = 0;
@@ -833,7 +910,7 @@ public:
 
   // transpose the graph
   void transpose() {
-    std::swap(out_degree, in_degree);
+    std::swap(out_degree_by_socket, in_degree_by_socket);
     std::swap(outgoing_edges, incoming_edges);
     std::swap(outgoing_adj_index, incoming_adj_index);
     std::swap(outgoing_adj_bitmap, incoming_adj_bitmap);
@@ -871,10 +948,29 @@ public:
     int fin = open(path.c_str(), O_RDONLY);
     EdgeUnit<EdgeData> * read_edge_buffer = new EdgeUnit<EdgeData> [CHUNKSIZE];
 
-    out_degree = alloc_interleaved_vertex_array<VertexId>();
-    for (VertexId v_i=0;v_i<vertices;v_i++) {
-      out_degree[v_i] = 0;
+    // NUMA-aware: prelim partition by sockets (equal split) for bootstrap; each loader thread allocs + inits its range
+    std::vector<VertexId> prelim_local_partition_offset(sockets + 1);
+    for (int s_i = 0; s_i <= sockets; s_i++) {
+      prelim_local_partition_offset[s_i] = (VertexId)s_i * vertices / sockets;
     }
+    std::vector<VertexId*> out_degree_prelim(sockets);
+    run_on_loader_threads([&](int s_i) {
+      VertexId count = prelim_local_partition_offset[s_i + 1] - prelim_local_partition_offset[s_i];
+      out_degree_prelim[s_i] = (VertexId*)malloc(sizeof(VertexId) * count);
+      for (VertexId v_i = 0; v_i < count; v_i++) {
+        out_degree_prelim[s_i][v_i] = 0;
+      }
+    });
+    auto get_prelim_out_degree_ptr = [&](VertexId src) -> VertexId* {
+      int s = (vertices > 0) ? (int)((uint64_t)src * sockets / vertices) : 0;
+      if (s >= sockets) s = sockets - 1;
+      return &out_degree_prelim[s][src - prelim_local_partition_offset[s]];
+    };
+    auto get_prelim_out_degree = [&](VertexId v) -> VertexId {
+      int s = (vertices > 0) ? (int)((uint64_t)v * sockets / vertices) : 0;
+      if (s >= sockets) s = sockets - 1;
+      return out_degree_prelim[s][v - prelim_local_partition_offset[s]];
+    };
     assert(lseek(fin, read_offset, SEEK_SET)==read_offset);
     read_bytes = 0;
     while (read_bytes < bytes_to_read) {
@@ -887,18 +983,9 @@ public:
       assert(curr_read_bytes>=0);
       read_bytes += curr_read_bytes;
       EdgeId curr_read_edges = curr_read_bytes / edge_unit_size;
-      #if 0
-      #pragma omp parallel for
-      for (EdgeId e_i=0;e_i<curr_read_edges;e_i++) {
-        VertexId src = read_edge_buffer[e_i].src;
-        VertexId dst = read_edge_buffer[e_i].dst;
-        __sync_fetch_and_add(&out_degree[src], 1);
-      }
-      #endif
       Parallel::For([&](EdgeId e_i) {
         VertexId src = read_edge_buffer[e_i].src;
-        VertexId dst = read_edge_buffer[e_i].dst;
-        __sync_fetch_and_add(&out_degree[src], 1);
+        __sync_fetch_and_add(get_prelim_out_degree_ptr(src), 1);
       }, 0, curr_read_edges);
     }
     // MPI_Allreduce(MPI_IN_PLACE, out_degree, vertices, vid_t, MPI_SUM, MPI_COMM_WORLD);
@@ -915,7 +1002,7 @@ public:
       } else {
         EdgeId got_edges = 0;
         for (VertexId v_i=partition_offset[i];v_i<vertices;v_i++) {
-          got_edges += out_degree[v_i] + alpha;
+          got_edges += get_prelim_out_degree(v_i) + alpha;
           if (got_edges > expected_chunk_size) {
             partition_offset[i+1] = v_i;
             break;
@@ -924,7 +1011,7 @@ public:
         partition_offset[i+1] = (partition_offset[i+1]) / PAGESIZE * PAGESIZE; // aligned with pages
       }
       for (VertexId v_i=partition_offset[i];v_i<partition_offset[i+1];v_i++) {
-        remained_amount -= out_degree[v_i] + alpha;
+        remained_amount -= get_prelim_out_degree(v_i) + alpha;
       }
     }
     assert(partition_offset[partitions]==vertices);
@@ -944,7 +1031,7 @@ public:
       for (int i=0;i<partitions;i++) {
         EdgeId part_out_edges = 0;
         for (VertexId v_i=partition_offset[i];v_i<partition_offset[i+1];v_i++) {
-          part_out_edges += out_degree[v_i];
+          part_out_edges += get_prelim_out_degree(v_i);
         }
         printf("|V'_%d| = %u |E^dense_%d| = %lu\n", i, partition_offset[i+1] - partition_offset[i], i, part_out_edges);
       }
@@ -956,7 +1043,7 @@ public:
       local_partition_offset = new VertexId [sockets + 1];
       EdgeId part_out_edges = 0;
       for (VertexId v_i=partition_offset[partition_id];v_i<partition_offset[partition_id+1];v_i++) {
-        part_out_edges += out_degree[v_i];
+        part_out_edges += get_prelim_out_degree(v_i);
       }
       local_partition_offset[0] = partition_offset[partition_id];
       EdgeId remained_amount = part_out_edges + EdgeId(owned_vertices) * alpha;
@@ -968,7 +1055,7 @@ public:
         } else {
           EdgeId got_edges = 0;
           for (VertexId v_i=local_partition_offset[s_i];v_i<partition_offset[partition_id+1];v_i++) {
-            got_edges += out_degree[v_i] + alpha;
+            got_edges += get_prelim_out_degree(v_i) + alpha;
             if (got_edges > expected_chunk_size) {
               local_partition_offset[s_i+1] = v_i;
               break;
@@ -978,8 +1065,8 @@ public:
         }
         EdgeId sub_part_out_edges = 0;
         for (VertexId v_i=local_partition_offset[s_i];v_i<local_partition_offset[s_i+1];v_i++) {
-          remained_amount -= out_degree[v_i] + alpha;
-          sub_part_out_edges += out_degree[v_i];
+          remained_amount -= get_prelim_out_degree(v_i) + alpha;
+          sub_part_out_edges += get_prelim_out_degree(v_i);
         }
         #ifdef PRINT_DEBUG_MESSAGES
         printf("|V'_%d_%d| = %u |E^dense_%d_%d| = %lu\n", partition_id, s_i, local_partition_offset[s_i+1] - local_partition_offset[s_i], partition_id, s_i, sub_part_out_edges);
@@ -987,16 +1074,29 @@ public:
       }
     }
 
-    VertexId * filtered_out_degree = alloc_vertex_array<VertexId>();
-    for (VertexId v_i=partition_offset[partition_id];v_i<partition_offset[partition_id+1];v_i++) {
-      filtered_out_degree[v_i] = out_degree[v_i];
+    // NUMA-aware: each loader thread allocates out_degree_by_socket[s] and copies from prelim
+    out_degree_by_socket = new VertexId* [sockets];
+    run_on_loader_threads([&](int s_i) {
+      VertexId count = local_partition_offset[s_i + 1] - local_partition_offset[s_i];
+      out_degree_by_socket[s_i] = (VertexId*)malloc(sizeof(VertexId) * count);
+      for (VertexId i = 0; i < count; i++) {
+        VertexId v = local_partition_offset[s_i] + i;
+        int ps = (vertices > 0) ? (int)((uint64_t)v * sockets / vertices) : 0;
+        if (ps >= sockets) ps = sockets - 1;
+        out_degree_by_socket[s_i][i] = out_degree_prelim[ps][v - prelim_local_partition_offset[ps]];
+      }
+    });
+    for (int s_i = 0; s_i < sockets; s_i++) {
+      free(out_degree_prelim[s_i]);
     }
-    free(out_degree);
-    out_degree = filtered_out_degree;
-    in_degree = alloc_vertex_array<VertexId>();
-    for (VertexId v_i=partition_offset[partition_id];v_i<partition_offset[partition_id+1];v_i++) {
-      in_degree[v_i] = 0;
-    }
+    in_degree_by_socket = new VertexId* [sockets];
+    run_on_loader_threads([&](int s_i) {
+      VertexId count = local_partition_offset[s_i + 1] - local_partition_offset[s_i];
+      in_degree_by_socket[s_i] = (VertexId*)malloc(sizeof(VertexId) * count);
+      for (VertexId i = 0; i < count; i++) {
+        in_degree_by_socket[s_i][i] = 0;
+      }
+    });
 
     int * buffered_edges = new int [partitions];
     std::vector<char> * send_buffer = new std::vector<char> [partitions];
@@ -1010,11 +1110,11 @@ public:
     outgoing_adj_index = new EdgeId* [sockets];
     outgoing_adj_list = new AdjUnit<EdgeData>* [sockets];
     outgoing_adj_bitmap = new Bitmap * [sockets];
-    for (int s_i=0;s_i<sockets;s_i++) {
+    run_on_loader_threads([&](int s_i) {
       outgoing_adj_bitmap[s_i] = new Bitmap (vertices);
       outgoing_adj_bitmap[s_i]->clear();
       outgoing_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
-    }
+    });
     {
       // std::thread recv_thread_dst([&]() {
       //   int finished_count = 0;
@@ -1079,7 +1179,7 @@ public:
             outgoing_adj_index[dst_part][src] = 0;
           }
           __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
-          __sync_fetch_and_add(&in_degree[dst], 1);
+          __sync_fetch_and_add(get_in_degree_ptr(dst), 1);
         }, 0, recv_edges);
         recv_outgoing_edges += recv_edges;
       };
@@ -1138,6 +1238,8 @@ public:
           compressed_outgoing_adj_vertices[s_i] += 1;
         }
       }
+    }
+    run_on_loader_threads([&](int s_i) {
       compressed_outgoing_adj_index[s_i] = (CompressedAdjIndexUnit*)malloc( sizeof(CompressedAdjIndexUnit) * (compressed_outgoing_adj_vertices[s_i] + 1) );
       compressed_outgoing_adj_index[s_i][0].index = 0;
       EdgeId last_e_i = 0;
@@ -1160,7 +1262,7 @@ public:
       printf("part(%d) E_%d has %lu sparse mode edges\n", partition_id, s_i, outgoing_edges[s_i]);
       #endif
       outgoing_adj_list[s_i] = (AdjUnit<EdgeData>*)malloc(unit_size * outgoing_edges[s_i]);
-    }
+    });
     {
 //       std::thread recv_thread_dst([&]() {
 //         int finished_count = 0;
@@ -1757,7 +1859,7 @@ auto deal_with_shuffle_graph = [&](EdgeUnit<EdgeData> *recv_buffer,
     R reducer = 0;
     EdgeId active_edges = process_vertices<EdgeId>(
       [&](VertexId vtx){
-        return (EdgeId)out_degree[vtx];
+        return (EdgeId)get_out_degree(vtx);
       },
       active
     );
