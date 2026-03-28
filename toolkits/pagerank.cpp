@@ -205,6 +205,12 @@ void compute(Graph<Empty> * graph, int iterations) {
         double sum = 0;
         for (AdjUnit<Empty> * ptr=incoming_adj.begin;ptr!=incoming_adj.end;ptr++) {
           VertexId src = ptr->neighbour;
+          if (src >= graph->vertices) {
+            printf("[BUG] src >= graph->vertices\n");
+            exit(1);
+          }
+          printf("[BUG] curr = %p, src = %u, vertices = %u\n", curr, src, graph->vertices);
+          printf("[BUG] curr[src] = %lf\n", (long long)curr + src * sizeof(double));
           sum += curr[src];
         }
         graph->emit(dst, sum);
