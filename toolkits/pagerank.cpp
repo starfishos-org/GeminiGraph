@@ -205,12 +205,12 @@ void compute(Graph<Empty> * graph, int iterations) {
         double sum = 0;
         for (AdjUnit<Empty> * ptr=incoming_adj.begin;ptr!=incoming_adj.end;ptr++) {
           VertexId src = ptr->neighbour;
-          if (src >= graph->vertices) {
-            printf("[BUG] src >= graph->vertices\n");
-            exit(1);
-          }
-          printf("[BUG] curr = %p, src = %u, vertices = %u\n", curr, src, graph->vertices);
-          printf("[BUG] curr[src] = %lf\n", (long long)curr + src * sizeof(double));
+          // if (src >= graph->vertices) {
+          //   printf("[BUG] src >= graph->vertices\n");
+          //   exit(1);
+          // }
+          // printf("[BUG] curr = %p, src = %u, vertices = %u\n", curr, src, graph->vertices);
+          // printf("[BUG] curr[src] = %lf\n", (long long)curr + src * sizeof(double));
           sum += curr[src];
         }
         graph->emit(dst, sum);
@@ -318,6 +318,7 @@ int main(int argc, char ** argv) {
   usys_set_affinity(-2, main_cpu);
 
   uint32_t thread_count = (uint32_t)ThreadPool::bind_cpu_list.size();
+  DEBUG_PRINT("thread_count: %u\n", thread_count);
   Parallel::SetThreadCount(thread_count);
   graph = new Graph<Empty>(Graph<Empty>::FromBindCpuList());
 #else

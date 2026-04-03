@@ -69,18 +69,44 @@ struct MessageBuffer {
   size_t capacity;
   unsigned count; // the actual size (i.e. bytes) should be sizeof(element) * count
   char * data;
+#ifdef OS_CHCORE
+  bool cxl_backed;
+#endif
   MessageBuffer () {
     capacity = 0;
     count = 0;
     data = NULL;
+#ifdef OS_CHCORE
+    cxl_backed = false;
+#endif
   }
-  void init (int socket_id) {
+  void init (int socket_id, bool use_cxl = false) {
     capacity = 4096;
     count = 0;
+#ifdef OS_CHCORE
+    cxl_backed = use_cxl;
+    if (use_cxl) {
+      data = (char*)mmap(NULL, capacity, PROT_READ|PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FLAG_SHARED, -1, 0);
+      return;
+    }
+#endif
     data = (char*)malloc(capacity);
   }
   void resize(size_t new_capacity) {
     if (new_capacity > capacity) {
+#ifdef OS_CHCORE
+      if (cxl_backed) {
+        char * new_data = (char*)mmap(NULL, new_capacity, PROT_READ|PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FLAG_SHARED, -1, 0);
+        assert(new_data != MAP_FAILED);
+        if (data && capacity > 0) {
+          memcpy(new_data, data, capacity);
+          munmap(data, capacity);
+        }
+        data = new_data;
+        capacity = new_capacity;
+        return;
+      }
+#endif
       char * new_data = (char*)realloc(data, new_capacity);
       assert(new_data!=NULL);
       data = new_data;
@@ -292,9 +318,9 @@ public:
       recv_buffer[i] = new MessageBuffer * [sockets];
       for (int s_i=0;s_i<sockets;s_i++) {
         send_buffer[i][s_i] = (MessageBuffer*)malloc( sizeof(MessageBuffer));
-        send_buffer[i][s_i]->init(s_i);
+        send_buffer[i][s_i]->init(s_i, true);
         recv_buffer[i][s_i] = (MessageBuffer*)malloc( sizeof(MessageBuffer));
-        recv_buffer[i][s_i]->init(s_i);
+        recv_buffer[i][s_i]->init(s_i, true);
       }
     }
 
@@ -319,7 +345,8 @@ public:
 #endif
     Parallel::For([array, value](VertexId v_i) { array[v_i] = value; },
                   partition_offset[partition_id],
-                  partition_offset[partition_id + 1]);
+                  partition_offset[partition_id + 1],
+                  1, -1, 0 /* fixed_machine_id=0: all tasks to machine 0 */);
   }
 
   // allocate a numa-aware vertex array
@@ -656,6 +683,7 @@ public:
       outgoing_adj_bitmap[s_i] = new Bitmap (vertices);
       outgoing_adj_bitmap[s_i]->clear();
       outgoing_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
+      memset(outgoing_adj_index[s_i], 0, sizeof(EdgeId) * (vertices+1));
     });
     {
       // std::thread recv_thread_dst([&]() {
@@ -701,7 +729,6 @@ public:
           int dst_part = get_local_partition_id(dst);
           if (!outgoing_adj_bitmap[dst_part]->get_bit(src)) {
             outgoing_adj_bitmap[dst_part]->set_bit(src);
-            outgoing_adj_index[dst_part][src] = 0;
           }
           __sync_fetch_and_add(&outgoing_adj_index[dst_part][src], 1);
         }
@@ -1004,14 +1031,18 @@ public:
     compressed_incoming_adj_index_replica = new CompressedAdjIndexUnit**[sockets];
     Parallel::InvokePerMachine([this](uint32_t m) {
       /* Replicate incoming_adj_list */
-      size_t total_edges = (size_t)incoming_edges[0] + (size_t)incoming_edges[1];
+      size_t total_edges = 0;
+      for (int s_i = 0; s_i < sockets; s_i++)
+        total_edges += (size_t)incoming_edges[s_i];
       size_t total_bytes = unit_size * total_edges;
       AdjUnit<EdgeData>* full_buf = (AdjUnit<EdgeData>*)malloc(total_bytes);
-      memcpy(full_buf, incoming_adj_list[0], unit_size * incoming_edges[0]);
-      memcpy(full_buf + incoming_edges[0], incoming_adj_list[1], unit_size * incoming_edges[1]);
       incoming_adj_list_replica[m] = new AdjUnit<EdgeData>*[sockets];
-      incoming_adj_list_replica[m][0] = full_buf;
-      incoming_adj_list_replica[m][1] = full_buf + incoming_edges[0];
+      size_t offset = 0;
+      for (int s_i = 0; s_i < sockets; s_i++) {
+        memcpy(full_buf + offset, incoming_adj_list[s_i], unit_size * incoming_edges[s_i]);
+        incoming_adj_list_replica[m][s_i] = full_buf + offset;
+        offset += incoming_edges[s_i];
+      }
       /* Replicate compressed_incoming_adj_index for cross-machine steal without CXL migration */
       compressed_incoming_adj_index_replica[m] = new CompressedAdjIndexUnit*[sockets];
       for (int s_i = 0; s_i < sockets; s_i++) {
@@ -1234,6 +1265,7 @@ public:
       outgoing_adj_bitmap[s_i] = new Bitmap (vertices);
       outgoing_adj_bitmap[s_i]->clear();
       outgoing_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
+      memset(outgoing_adj_index[s_i], 0, sizeof(EdgeId) * (vertices+1));
     });
     {
       // std::thread recv_thread_dst([&]() {
@@ -1327,7 +1359,6 @@ public:
                      dst < partition_offset[partition_id + 1]);
               if (!outgoing_adj_bitmap[s_i]->get_bit(src)) {
                 outgoing_adj_bitmap[s_i]->set_bit(src);
-                outgoing_adj_index[s_i][src] = 0;
               }
               __sync_fetch_and_add(&outgoing_adj_index[s_i][src], 1);
               __sync_fetch_and_add(get_in_degree_ptr(dst), 1);
@@ -1619,6 +1650,7 @@ public:
       incoming_adj_bitmap[s_i] = new Bitmap (vertices);
       incoming_adj_bitmap[s_i]->clear();
       incoming_adj_index[s_i] = (EdgeId*)malloc(sizeof(EdgeId) * (vertices+1));
+      memset(incoming_adj_index[s_i], 0, sizeof(EdgeId) * (vertices+1));
     });
     {
       // std::thread recv_thread_src([&]() {
@@ -1708,7 +1740,6 @@ public:
                      src < partition_offset[partition_id + 1]);
               if (!incoming_adj_bitmap[s_i]->get_bit(dst)) {
                 incoming_adj_bitmap[s_i]->set_bit(dst);
-                incoming_adj_index[s_i][dst] = 0;
               }
               __sync_fetch_and_add(&incoming_adj_index[s_i][dst], 1);
             }
@@ -2613,7 +2644,8 @@ public:
               // int t_i = (thread_id + t_offset) % threads;
             /* steal from the current socket first, then from other sockets */
             int socket_begin = get_socket_id(thread_id) * threads_per_socket;
-            for (int t_i=socket_begin;t_i<socket_begin+threads;t_i++) {
+            for (int t_i_off=0;t_i_off<threads;t_i_off++) {
+              int t_i = (socket_begin + t_i_off) % threads;
               if (t_i == thread_id) continue;
               int s_i = get_socket_id(t_i);
               while (thread_state[t_i]->status!=STEALING) {
@@ -2635,6 +2667,9 @@ public:
           // double dense_pull_invoke_time = 0;
           // dense_pull_invoke_time -= get_time();
           Parallel::Invoke(func, threads);
+          for (int t_i=0;t_i<threads;t_i++) {
+            flush_local_send_buffer<M>(t_i);
+          }
           // dense_pull_invoke_time += get_time();
           // if (partition_id == 0) {
           //   printf("[profile][dense_pull_invoke] time=%lf(s)\n", dense_pull_invoke_time);

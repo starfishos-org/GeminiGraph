@@ -58,7 +58,7 @@ static int parse_bind_cpu_file(const char *filename, std::vector<int> &out_list)
 }
 
 #if ENABLE_DEBUG_PRINT
-#define DEBUG_PRINT(...) printf(__VA_ARGS__)
+#define DEBUG_PRINT(...) fprintf(stderr, __VA_ARGS__)
 #else
 #define DEBUG_PRINT(...)
 #endif
@@ -269,6 +269,7 @@ private:
         if (!ThreadPool::bind_cpu_list.empty() && global_thread_id < ThreadPool::bind_cpu_list.size()) {
             int cpu = ThreadPool::bind_cpu_list[global_thread_id];
             usys_set_affinity(-2, cpu);
+            fprintf(stderr, "[%s:%d] bind_cpu: %d\n", __FILE__, __LINE__, cpu);
             usys_yield();
         }
         ThreadPool::thread_id = global_thread_id;
