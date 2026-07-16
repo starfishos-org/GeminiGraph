@@ -266,7 +266,28 @@ public:
   /* Run func(s_i) on each machine; uses Parallel::InvokePerMachine for NUMA-local execution. */
   void run_on_loader_threads(std::function<void(int s_i)> func) {
     if (sockets <= 0) return;
+#ifdef OS_CHCORE
     Parallel::InvokePerMachine([&func](uint32_t m) { func((int)m); });
+#else
+    /* Linux has a single socket here.  Calling InvokePerMachine and then
+     * InvokeOnMachine from func would nest work on the same pool; if an inner
+     * task lands on the blocked outer worker's queue, the build deadlocks. */
+    for (int s_i = 0; s_i < sockets; s_i++)
+      func(s_i);
+#endif
+  }
+
+  template <typename Func>
+  void run_on_loader_workers(int s_i, Func func, uint32_t start,
+                             uint32_t count) {
+    if (count == 0) return;
+    /* run_on_loader_threads already occupies one machine-local worker.  With
+     * a one-worker machine, queuing nested work to that same pool deadlocks. */
+    if (count == 1) {
+      func(start);
+      return;
+    }
+    Parallel::InvokeOnMachine((uint32_t)s_i, func, start, count);
   }
 
   void init() {
@@ -1025,6 +1046,52 @@ public:
   }
 
 #ifdef OS_CHCORE
+  void validate_loaded_graph() {
+    bool offsets_valid = local_partition_offset[0] == 0
+                         && local_partition_offset[sockets] == vertices;
+    for (int s_i = 0; s_i < sockets; s_i++) {
+      offsets_valid = offsets_valid
+                      && local_partition_offset[s_i] <= vertices
+                      && local_partition_offset[s_i + 1] <= vertices
+                      && local_partition_offset[s_i]
+                         <= local_partition_offset[s_i + 1];
+    }
+    if (!offsets_valid) {
+      fprintf(stderr,
+              "GeminiGraph load invariant failed: invalid partition offsets "
+              "(vertices=%u sockets=%d)\n",
+              vertices, sockets);
+      abort();
+    }
+
+    std::vector<EdgeId> degree_sum_by_socket(sockets, 0);
+    run_on_loader_threads([&](int s_i) {
+      VertexId count = local_partition_offset[s_i + 1]
+                       - local_partition_offset[s_i];
+      EdgeId local_sum = 0;
+      for (VertexId i = 0; i < count; i++)
+        local_sum += out_degree_by_socket[s_i][i];
+      degree_sum_by_socket[s_i] = local_sum;
+    });
+
+    EdgeId degree_sum = 0;
+    EdgeId outgoing_sum = 0;
+    EdgeId incoming_sum = 0;
+    for (int s_i = 0; s_i < sockets; s_i++) {
+      degree_sum += degree_sum_by_socket[s_i];
+      outgoing_sum += outgoing_edges[s_i];
+      incoming_sum += incoming_edges[s_i];
+    }
+    if (degree_sum != edges || outgoing_sum != edges || incoming_sum != edges) {
+      fprintf(stderr,
+              "GeminiGraph load invariant failed: edges=%lu degree=%lu "
+              "outgoing=%lu incoming=%lu\n",
+              (unsigned long)edges, (unsigned long)degree_sum,
+              (unsigned long)outgoing_sum, (unsigned long)incoming_sum);
+      abort();
+    }
+  }
+
   void replicate_incoming_adj_list() {
     if (sockets <= 1) return;
     incoming_adj_list_replica = new AdjUnit<EdgeData>**[sockets];
@@ -1052,8 +1119,9 @@ public:
         memcpy(buf, compressed_incoming_adj_index[s_i], sz);
         compressed_incoming_adj_index_replica[m][s_i] = buf;
       }
-      use_incoming_replica = true;
     });
+    /* Publish only after every per-machine replica is complete. */
+    use_incoming_replica = true;
   }
 #endif
 
@@ -1218,7 +1286,7 @@ public:
       out_degree_by_socket[s_i] = (VertexId*)malloc(sizeof(VertexId) * count);
       uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, (size_t)count);
       if (nw == 0) nw = 1;
-      Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+      run_on_loader_workers(s_i, [&](uint32_t tid) {
         size_t chunk = ((size_t)count + nw - 1) / nw;
         VertexId i_beg = (VertexId)((size_t)tid * chunk);
         VertexId i_end = (VertexId)std::min(i_beg + (VertexId)chunk, count);
@@ -1239,7 +1307,7 @@ public:
       in_degree_by_socket[s_i] = (VertexId*)malloc(sizeof(VertexId) * count);
       uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, (size_t)count);
       if (nw == 0) nw = 1;
-      Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+      run_on_loader_workers(s_i, [&](uint32_t tid) {
         size_t chunk = ((size_t)count + nw - 1) / nw;
         VertexId i_beg = (VertexId)((size_t)tid * chunk);
         VertexId i_end = (VertexId)std::min(i_beg + (VertexId)chunk, count);
@@ -1347,7 +1415,7 @@ public:
           if (bucket.empty()) return;
           uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, bucket.size());
           if (nw == 0) nw = 1;
-          Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+          run_on_loader_workers(s_i, [&](uint32_t tid) {
             size_t chunk = (bucket.size() + nw - 1) / nw;
             size_t beg = (size_t)tid * chunk;
             size_t end = std::min(beg + chunk, bucket.size());
@@ -1418,7 +1486,7 @@ public:
       if (nw == 0) nw = 1;
       std::vector<EdgeId> local_edges(nw, 0);
       std::vector<VertexId> local_verts(nw, 0);
-      Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+      run_on_loader_workers(s_i, [&](uint32_t tid) {
         size_t chunk = ((size_t)vertices + nw - 1) / nw;
         VertexId beg = (VertexId)((size_t)tid * chunk);
         VertexId end = (VertexId)std::min(beg + (VertexId)chunk, (VertexId)vertices);
@@ -1462,7 +1530,7 @@ public:
         VertexId ncv = compressed_outgoing_adj_vertices[s_i];
         uint32_t nw2 = (uint32_t)std::min((size_t)threads_per_socket, (size_t)ncv);
         if (nw2 == 0) nw2 = 1;
-        Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+        run_on_loader_workers(s_i, [&](uint32_t tid) {
           size_t chunk = ((size_t)ncv + nw2 - 1) / nw2;
           VertexId p_beg = (VertexId)((size_t)tid * chunk);
           VertexId p_end = (VertexId)std::min(p_beg + (VertexId)chunk, ncv);
@@ -1558,7 +1626,7 @@ public:
           if (bucket.empty()) return;
           uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, bucket.size());
           if (nw == 0) nw = 1;
-          Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+          run_on_loader_workers(s_i, [&](uint32_t tid) {
             size_t chunk = (bucket.size() + nw - 1) / nw;
             size_t beg = (size_t)tid * chunk;
             size_t end = std::min(beg + chunk, bucket.size());
@@ -1622,7 +1690,7 @@ public:
       VertexId ncv = compressed_outgoing_adj_vertices[s_i];
       uint32_t nw2 = (uint32_t)std::min((size_t)threads_per_socket, (size_t)ncv);
       if (nw2 > 1) {
-        Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+        run_on_loader_workers(s_i, [&](uint32_t tid) {
           size_t chunk = ((size_t)ncv + nw2 - 1) / nw2;
           VertexId p_beg = (VertexId)((size_t)tid * chunk);
           VertexId p_end = (VertexId)std::min(p_beg + (VertexId)chunk, ncv);
@@ -1729,7 +1797,7 @@ public:
           if (bucket.empty()) return;
           uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, bucket.size());
           if (nw == 0) nw = 1;
-          Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+          run_on_loader_workers(s_i, [&](uint32_t tid) {
             size_t chunk = (bucket.size() + nw - 1) / nw;
             size_t beg = (size_t)tid * chunk;
             size_t end = std::min(beg + chunk, bucket.size());
@@ -1798,7 +1866,7 @@ public:
       if (nw == 0) nw = 1;
       std::vector<EdgeId> local_edges(nw, 0);
       std::vector<VertexId> local_verts(nw, 0);
-      Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+      run_on_loader_workers(s_i, [&](uint32_t tid) {
         size_t chunk = ((size_t)vertices + nw - 1) / nw;
         VertexId beg = (VertexId)((size_t)tid * chunk);
         VertexId end = (VertexId)std::min(beg + (VertexId)chunk, (VertexId)vertices);
@@ -1842,7 +1910,7 @@ public:
         VertexId ncv = compressed_incoming_adj_vertices[s_i];
         uint32_t nw2 = (uint32_t)std::min((size_t)threads_per_socket, (size_t)ncv);
         if (nw2 == 0) nw2 = 1;
-        Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+        run_on_loader_workers(s_i, [&](uint32_t tid) {
           size_t chunk = ((size_t)ncv + nw2 - 1) / nw2;
           VertexId p_beg = (VertexId)((size_t)tid * chunk);
           VertexId p_end = (VertexId)std::min(p_beg + (VertexId)chunk, ncv);
@@ -1940,7 +2008,7 @@ public:
           if (bucket.empty()) return;
           uint32_t nw = (uint32_t)std::min((size_t)threads_per_socket, bucket.size());
           if (nw == 0) nw = 1;
-          Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+          run_on_loader_workers(s_i, [&](uint32_t tid) {
             size_t chunk = (bucket.size() + nw - 1) / nw;
             size_t beg = (size_t)tid * chunk;
             size_t end = std::min(beg + chunk, bucket.size());
@@ -2004,7 +2072,7 @@ public:
       VertexId ncv = compressed_incoming_adj_vertices[s_i];
       uint32_t nw2 = (uint32_t)std::min((size_t)threads_per_socket, (size_t)ncv);
       if (nw2 > 1) {
-        Parallel::InvokeOnMachine((uint32_t)s_i, [&](uint32_t tid) {
+        run_on_loader_workers(s_i, [&](uint32_t tid) {
           size_t chunk = ((size_t)ncv + nw2 - 1) / nw2;
           VertexId p_beg = (VertexId)((size_t)tid * chunk);
           VertexId p_end = (VertexId)std::min(p_beg + (VertexId)chunk, ncv);
@@ -2035,6 +2103,7 @@ public:
     tune_chunks();
 
 #ifdef OS_CHCORE
+    validate_loaded_graph();
     /* Replicate after transposes so we copy the final incoming_adj_list used by compute */
     if (sockets > 1) {
       replicate_incoming_adj_list();
@@ -2213,20 +2282,28 @@ public:
         }
       }
       thread_state[thread_id]->status = STEALING;
-      for (int t_offset = 1; t_offset < threads; t_offset++) {
-        int t_i = (thread_id + t_offset) % threads;
-        while (thread_state[t_i]->status != STEALING) {
-          VertexId v_i =
-              __sync_fetch_and_add(&thread_state[t_i]->curr, basic_chunk);
-          if (v_i >= thread_state[t_i]->end)
-            continue;
-          unsigned long word = active->data[WORD_OFFSET(v_i)];
-          while (word != 0) {
-            if (word & 1) {
-              local_reducer += process(v_i);
+      /* status is a plain field and the curr/status publication protocol is
+       * only reliable between workers on one machine.  Cross-machine steals
+       * replayed or skipped chunks in two-machine PageRank, so retain load
+       * balancing only among this machine's workers. */
+      {
+        int socket_begin = get_socket_id(thread_id) * threads_per_socket;
+        for (int t_offset = 0; t_offset < threads_per_socket; t_offset++) {
+          int t_i = socket_begin + t_offset;
+          if (t_i == thread_id) continue;
+          while (thread_state[t_i]->status != STEALING) {
+            VertexId v_i =
+                __sync_fetch_and_add(&thread_state[t_i]->curr, basic_chunk);
+            if (v_i >= thread_state[t_i]->end)
+              continue;
+            unsigned long word = active->data[WORD_OFFSET(v_i)];
+            while (word != 0) {
+              if (word & 1) {
+                local_reducer += process(v_i);
+              }
+              v_i++;
+              word = word >> 1;
             }
-            v_i++;
-            word = word >> 1;
           }
         }
       }
@@ -2253,8 +2330,22 @@ public:
   template<typename M>
   void flush_local_send_buffer(int t_i) {
     int s_i = get_socket_id(t_i);
-    int pos = __sync_fetch_and_add(&send_buffer[current_send_part_id][s_i]->count, local_send_buffer[t_i]->count);
-    memcpy(send_buffer[current_send_part_id][s_i]->data + sizeof(MsgUnit<M>) * pos, local_send_buffer[t_i]->data, sizeof(MsgUnit<M>) * local_send_buffer[t_i]->count);
+    MessageBuffer * destination = send_buffer[current_send_part_id][s_i];
+    unsigned local_count = local_send_buffer[t_i]->count;
+    unsigned pos = __sync_fetch_and_add(&destination->count, local_count);
+    size_t capacity_messages = destination->capacity / sizeof(MsgUnit<M>);
+    if ((size_t)pos > capacity_messages
+        || (size_t)local_count > capacity_messages - (size_t)pos) {
+      fprintf(stderr,
+              "GeminiGraph message buffer overflow: part=%d socket=%d "
+              "pos=%u count=%u capacity=%zu\n",
+              current_send_part_id, s_i, pos, local_count,
+              capacity_messages);
+      abort();
+    }
+    memcpy(destination->data + sizeof(MsgUnit<M>) * pos,
+           local_send_buffer[t_i]->data,
+           sizeof(MsgUnit<M>) * local_count);
     local_send_buffer[t_i]->count = 0;
   }
 
@@ -2640,25 +2731,35 @@ public:
               }
             }
             thread_state[thread_id]->status = STEALING;
-            // for (int t_offset=1;t_offset<threads;t_offset++) {
-              // int t_i = (thread_id + t_offset) % threads;
-            /* steal from the current socket first, then from other sockets */
-            int socket_begin = get_socket_id(thread_id) * threads_per_socket;
-            for (int t_i_off=0;t_i_off<threads;t_i_off++) {
-              int t_i = (socket_begin + t_i_off) % threads;
-              if (t_i == thread_id) continue;
-              int s_i = get_socket_id(t_i);
-              while (thread_state[t_i]->status!=STEALING) {
-                VertexId begin_p_v_i = __sync_fetch_and_add(&thread_state[t_i]->curr, basic_chunk);
-                if (begin_p_v_i >= thread_state[t_i]->end) break;
-                VertexId end_p_v_i = begin_p_v_i + basic_chunk;
-                if (end_p_v_i > thread_state[t_i]->end) {
-                  end_p_v_i = thread_state[t_i]->end;
-                }
-                CompressedAdjIndexUnit* cidx = get_compressed_incoming_adj_index(s_i);
-                for (VertexId p_v_i = begin_p_v_i; p_v_i < end_p_v_i; p_v_i ++) {
-                  VertexId v_i = cidx[p_v_i].vertex;
-                  dense_signal(v_i, VertexAdjList<EdgeData>(get_incoming_adj_list(s_i) + cidx[p_v_i].index, get_incoming_adj_list(s_i) + cidx[p_v_i+1].index));
+            /* See process_vertices(): steal only from machine-local workers. */
+            {
+              int socket_begin =
+                  get_socket_id(thread_id) * threads_per_socket;
+              for (int t_offset = 0; t_offset < threads_per_socket;
+                   t_offset++) {
+                int t_i = socket_begin + t_offset;
+                if (t_i == thread_id) continue;
+                int s_i = get_socket_id(t_i);
+                while (thread_state[t_i]->status != STEALING) {
+                  VertexId begin_p_v_i = __sync_fetch_and_add(
+                      &thread_state[t_i]->curr, basic_chunk);
+                  if (begin_p_v_i >= thread_state[t_i]->end) break;
+                  VertexId end_p_v_i = begin_p_v_i + basic_chunk;
+                  if (end_p_v_i > thread_state[t_i]->end) {
+                    end_p_v_i = thread_state[t_i]->end;
+                  }
+                  CompressedAdjIndexUnit *cidx =
+                      get_compressed_incoming_adj_index(s_i);
+                  for (VertexId p_v_i = begin_p_v_i;
+                       p_v_i < end_p_v_i; p_v_i++) {
+                    VertexId v_i = cidx[p_v_i].vertex;
+                    dense_signal(
+                        v_i,
+                        VertexAdjList<EdgeData>(
+                            get_incoming_adj_list(s_i) + cidx[p_v_i].index,
+                            get_incoming_adj_list(s_i)
+                                + cidx[p_v_i + 1].index));
+                  }
                 }
               }
             }
@@ -2771,4 +2872,3 @@ public:
 };
 
 #endif
-

@@ -208,6 +208,7 @@ private:
         auto *pool = static_cast<ThreadPool *>(arg);
         uint32_t thread_id = pool->thread_id_allocator++;
         pool->bind_cpu(thread_id);
+        ThreadPool::thread_id = thread_id;
         while (!pool->stop) {
             std::function<void()> task;
             if (pool->task_queues[thread_id].pop(task)) {

@@ -213,6 +213,20 @@ void compute(Graph<Empty> * graph, int iterations) {
           // printf("[BUG] curr[src] = %lf\n", (long long)curr + src * sizeof(double));
           sum += curr[src];
         }
+#ifdef OS_CHCORE
+        if (graph->partitions == 1) {
+          /*
+           * ChCore runs one shared graph partition across its machines.  In
+           * that mode emit() only copies this partial sum through a shared
+           * MessageBuffer before dense_slot adds it to the same CXL-backed
+           * next[dst].  Accumulate it directly instead: this is equivalent
+           * for one partition, keeps the atomic merge between source
+           * sockets, and avoids cross-machine buffer metadata/copy replay.
+          */
+          write_add(&next[dst], sum);
+          return;
+        }
+#endif
         graph->emit(dst, sum);
       },
       [&](VertexId dst, double msg) {
