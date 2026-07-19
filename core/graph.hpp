@@ -401,6 +401,13 @@ public:
     assert(p != NULL && p != MAP_FAILED);
     return p;
   }
+  /* Allocate a machine-private buffer in local DRAM. */
+  static void * alloc_dram_raw(size_t bytes) {
+    void * p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FLAG_PRIVATE, -1, 0);
+    assert(p != NULL && p != MAP_FAILED);
+    return p;
+  }
 #endif
 
   // deallocate a vertex array
@@ -1097,12 +1104,12 @@ public:
     incoming_adj_list_replica = new AdjUnit<EdgeData>**[sockets];
     compressed_incoming_adj_index_replica = new CompressedAdjIndexUnit**[sockets];
     Parallel::InvokePerMachine([this](uint32_t m) {
-      /* Replicate incoming_adj_list */
+      /* Replicate incoming_adj_list in machine-local DRAM. */
       size_t total_edges = 0;
       for (int s_i = 0; s_i < sockets; s_i++)
         total_edges += (size_t)incoming_edges[s_i];
       size_t total_bytes = unit_size * total_edges;
-      AdjUnit<EdgeData>* full_buf = (AdjUnit<EdgeData>*)malloc(total_bytes);
+      AdjUnit<EdgeData>* full_buf = (AdjUnit<EdgeData>*)alloc_dram_raw(total_bytes);
       incoming_adj_list_replica[m] = new AdjUnit<EdgeData>*[sockets];
       size_t offset = 0;
       for (int s_i = 0; s_i < sockets; s_i++) {
@@ -1115,7 +1122,7 @@ public:
       for (int s_i = 0; s_i < sockets; s_i++) {
         size_t n = (size_t)(compressed_incoming_adj_vertices[s_i] + 1);
         size_t sz = n * sizeof(CompressedAdjIndexUnit);
-        CompressedAdjIndexUnit* buf = (CompressedAdjIndexUnit*)malloc(sz);
+        CompressedAdjIndexUnit* buf = (CompressedAdjIndexUnit*)alloc_dram_raw(sz);
         memcpy(buf, compressed_incoming_adj_index[s_i], sz);
         compressed_incoming_adj_index_replica[m][s_i] = buf;
       }
