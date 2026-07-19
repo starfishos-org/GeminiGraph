@@ -10,6 +10,5 @@ uint32_t Parallel::thread_count;
 ThreadPool Parallel::thread_pool;
 #ifdef OS_CHCORE
 std::vector<std::unique_ptr<MachineThreadPool>> Parallel::machine_pools;
-std::atomic<uint32_t> Parallel::next_enqueue_machine(0);
 #endif
 const uint64_t Parallel::min_chunk_size = 100;

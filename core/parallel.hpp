@@ -238,10 +238,21 @@ class MachineThreadPool {
         uint32_t global_start;
     };
 
+    struct TaskRef {
+        std::function<void()> *function;
+        std::atomic<uint32_t> *remaining;
+    };
+
+    /* Calls submit at most O(thread_count) work at once.  Keeping references
+     * in an inline ring avoids moving std::function/deque storage between
+     * independent ChCore kernels and their per-kernel allocator state. */
+    static const uint32_t TASK_QUEUE_CAPACITY = 4096;
+
 public:
     MachineThreadPool(int machine_id_, uint32_t threads_this_machine,
                      uint32_t global_thread_start)
-        : machine_id(machine_id_), stop(false) {
+        : machine_id(machine_id_), task_head(0), task_tail(0), task_count(0),
+          stop(false) {
         workers.reserve(threads_this_machine);
         for (uint32_t i = 0; i < threads_this_machine; ++i) {
             pthread_t thread;
@@ -256,11 +267,22 @@ public:
         for (pthread_t &w : workers)
             pthread_join(w, nullptr);
     }
-    void enqueue(std::function<void()> task) {
-        while (queue_lock.test_and_set(std::memory_order_acquire))
+    void enqueue(std::function<void()> *function,
+                 std::atomic<uint32_t> *remaining) {
+        TaskRef task{function, remaining};
+        while (true) {
+            while (queue_lock.test_and_set(std::memory_order_acquire))
+                usys_yield();
+            if (task_count < TASK_QUEUE_CAPACITY) {
+                task_ring[task_tail] = task;
+                task_tail = (task_tail + 1) % TASK_QUEUE_CAPACITY;
+                task_count++;
+                queue_lock.clear(std::memory_order_release);
+                return;
+            }
+            queue_lock.clear(std::memory_order_release);
             usys_yield();
-        tasks.push(std::move(task));
-        queue_lock.clear(std::memory_order_release);
+        }
     }
 private:
     static void *worker_thread(void *arg) {
@@ -277,20 +299,31 @@ private:
         }
         ThreadPool::thread_id = global_thread_id;
         while (true) {
-            std::function<void()> task;
+            TaskRef task{nullptr, nullptr};
             bool have_task = false;
             while (pool->queue_lock.test_and_set(std::memory_order_acquire))
                 usys_yield();
-            if (!pool->tasks.empty()) {
-                task = std::move(pool->tasks.front());
-                pool->tasks.pop();
+            if (pool->task_count != 0) {
+                task = pool->task_ring[pool->task_head];
+                pool->task_head =
+                    (pool->task_head + 1) % TASK_QUEUE_CAPACITY;
+                pool->task_count--;
                 have_task = true;
             }
             bool should_stop = pool->stop.load(std::memory_order_acquire)
-                               && pool->tasks.empty();
+                               && pool->task_count == 0;
             pool->queue_lock.clear(std::memory_order_release);
-            if (have_task)
-                task();
+            if (have_task) {
+                if (task.function == nullptr || !*task.function
+                    || task.remaining == nullptr) {
+                    fprintf(stderr,
+                            "GeminiGraph empty queued task: machine=%d thread=%u\n",
+                            pool->machine_id, global_thread_id);
+                    abort();
+                }
+                (*task.function)();
+                task.remaining->fetch_sub(1, std::memory_order_release);
+            }
             else if (should_stop)
                 return nullptr;
             else
@@ -299,7 +332,10 @@ private:
     }
     int machine_id;
     std::vector<pthread_t> workers;
-    std::queue<std::function<void()>> tasks;
+    TaskRef task_ring[TASK_QUEUE_CAPACITY];
+    uint32_t task_head;
+    uint32_t task_tail;
+    uint32_t task_count;
     /* ChCore futex wait/wake is local to the kernel instance handling the
      * syscall.  A private std::condition_variable therefore cannot wake a
      * worker migrated to another machine.  Keep this distributed queue on a
@@ -320,29 +356,8 @@ class Parallel {
     static ThreadPool thread_pool;
 #ifdef OS_CHCORE
     static std::vector<std::unique_ptr<MachineThreadPool>> machine_pools;
-    static std::atomic<uint32_t> next_enqueue_machine;
 #endif
     static const uint64_t min_chunk_size;
-
-    static void enqueue_impl(std::function<void()> task) {
-#ifdef OS_CHCORE
-        if (!machine_pools.empty()) {
-            uint32_t m = next_enqueue_machine.fetch_add(1) % (uint32_t)machine_pools.size();
-            machine_pools[m]->enqueue(std::move(task));
-            return;
-        }
-#endif
-        thread_pool.enqueue(std::move(task));
-    }
-    static void enqueue_to_machine_impl(uint32_t machine_id, std::function<void()> task) {
-#ifdef OS_CHCORE
-        if (!machine_pools.empty() && machine_id < machine_pools.size()) {
-            machine_pools[machine_id]->enqueue(std::move(task));
-            return;
-        }
-#endif
-        thread_pool.enqueue(std::move(task));
-    }
 
     template <typename Count>
     static void complete_task(std::atomic<Count> &remaining,
@@ -374,6 +389,24 @@ class Parallel {
         std::unique_lock<std::mutex> lock(completion_mutex);
         completion_condition.wait(lock, [&remaining] { return remaining == 0; });
 #endif
+    }
+
+    static void enqueue_to_machine_impl(
+        uint32_t machine_id, std::function<void()> &task,
+        std::atomic<uint32_t> &remaining, std::mutex &completion_mutex,
+        std::condition_variable &completion_condition) {
+#ifdef OS_CHCORE
+        if (!machine_pools.empty() && machine_id < machine_pools.size()) {
+            machine_pools[machine_id]->enqueue(&task, &remaining);
+            return;
+        }
+#endif
+        thread_pool.enqueue([&task, &remaining, &completion_mutex,
+                             &completion_condition] {
+            task();
+            complete_task(remaining, completion_mutex,
+                          completion_condition);
+        });
     }
 
 public:
@@ -428,7 +461,6 @@ public:
             uint32_t tps = (num_machines > 0 && threads >= num_machines)
                 ? (threads / num_machines) : threads;
             machine_pools.clear();
-            next_enqueue_machine.store(0);
             for (uint32_t m = 0; m < num_machines; ++m) {
                 uint32_t global_start = m * tps;
                 uint32_t count = (m == num_machines - 1) ? (threads - global_start) : tps;
@@ -450,15 +482,17 @@ public:
         uint32_t num_machines = get_num_machines();
         if (num_machines == 0) return;
         std::atomic<uint32_t> remaining_tasks(num_machines);
+        std::vector<std::function<void()>> tasks;
+        tasks.reserve(num_machines);
         std::mutex completion_mutex;
         std::condition_variable completion_condition;
         for (uint32_t m = 0; m < num_machines; ++m) {
-            auto task = [=, &func, &remaining_tasks, &completion_mutex, &completion_condition] {
+            tasks.emplace_back([=, &func] {
                 func(m);
-                complete_task(remaining_tasks, completion_mutex,
-                              completion_condition);
-            };
-            enqueue_to_machine_impl(m, std::move(task));
+            });
+            enqueue_to_machine_impl(m, tasks.back(), remaining_tasks,
+                                    completion_mutex,
+                                    completion_condition);
         }
         wait_tasks(remaining_tasks, completion_mutex, completion_condition);
     }
@@ -471,6 +505,8 @@ public:
                                 uint32_t start_thread_id, uint32_t count) {
         if (count == 0) return;
         std::atomic<uint32_t> remaining_tasks(count);
+        std::vector<std::function<void()>> tasks;
+        tasks.reserve(count);
         std::mutex completion_mutex;
         std::condition_variable completion_condition;
         uint32_t num_machines = get_num_machines();
@@ -478,12 +514,12 @@ public:
         if (machine_id >= num_machines) machine_id = num_machines - 1;
         for (uint32_t j = 0; j < count; j++) {
             uint32_t tid = start_thread_id + j;
-            enqueue_to_machine_impl(machine_id,
-                [&func, &remaining_tasks, &completion_mutex, &completion_condition, tid]() {
-                    func(tid);
-                    complete_task(remaining_tasks, completion_mutex,
-                                  completion_condition);
-                });
+            tasks.emplace_back([&func, tid]() {
+                func(tid);
+            });
+            enqueue_to_machine_impl(machine_id, tasks.back(), remaining_tasks,
+                                    completion_mutex,
+                                    completion_condition);
         }
         wait_tasks(remaining_tasks, completion_mutex, completion_condition);
     }
@@ -491,6 +527,8 @@ public:
     template <typename Func> static void Invoke(Func func, uint32_t threads)
     {
         std::atomic<uint32_t> remaining_tasks(threads);
+        std::vector<std::function<void()>> tasks;
+        tasks.reserve(threads);
         std::mutex completion_mutex;
         std::condition_variable completion_condition;
         DEBUG_PRINT("Entering invoke, time: %lu\n", rdtsc());
@@ -501,12 +539,12 @@ public:
             uint32_t machine_id = (num_machines > 0 && tps > 0) ? (i / tps) : 0;
             if (machine_id >= num_machines)
                 machine_id = num_machines > 0 ? num_machines - 1 : 0;
-            auto task = [=, &func, &remaining_tasks, &completion_mutex, &completion_condition] {
+            tasks.emplace_back([=, &func] {
                 func(i);
-                complete_task(remaining_tasks, completion_mutex,
-                              completion_condition);
-            };
-            enqueue_to_machine_impl(machine_id, std::move(task));
+            });
+            enqueue_to_machine_impl(machine_id, tasks.back(), remaining_tasks,
+                                    completion_mutex,
+                                    completion_condition);
         }
 
         DEBUG_PRINT("Inserted invoke, time: %lu\n", rdtsc());
@@ -535,6 +573,8 @@ public:
                 ((end - start + incr - 1) / incr + chunk_size - 1) / chunk_size;
 
         std::atomic<uint32_t> remaining_tasks(total_chunks);
+        std::vector<std::function<void()>> tasks;
+        tasks.reserve(total_chunks);
         std::mutex completion_mutex;
         std::condition_variable completion_condition;
 
@@ -555,13 +595,13 @@ public:
                     machine_id = num_machines - 1;
             }
 
-            auto task = [=, &func, &remaining_tasks, &completion_mutex, &completion_condition] {
+            tasks.emplace_back([=, &func] {
                 for (uint64_t j = per_thread_start; j < per_thread_end; j += incr)
                     func(j);
-                complete_task(remaining_tasks, completion_mutex,
-                              completion_condition);
-            };
-            enqueue_to_machine_impl(machine_id, std::move(task));
+            });
+            enqueue_to_machine_impl(machine_id, tasks.back(), remaining_tasks,
+                                    completion_mutex,
+                                    completion_condition);
 
             if (per_thread_end == end) {
                 break;
@@ -582,14 +622,18 @@ public:
                 std::max((end - start + thread_count - 1) / thread_count,
                          min_chunk_size);
 
+        uint32_t total_chunks = (uint32_t)((end - start + chunk_size - 1)
+                                           / chunk_size);
         std::vector<T> results(thread_count, init);
-        std::atomic<int> remaining_tasks(thread_count);
+        std::atomic<uint32_t> remaining_tasks(total_chunks);
+        std::vector<std::function<void()>> tasks;
+        tasks.reserve(total_chunks);
         std::mutex completion_mutex;
         std::condition_variable completion_condition;
 
         uint32_t num_machines = get_num_machines();
         uint32_t tps = get_threads_per_socket();
-        for (uint32_t i = 0; i < thread_count; ++i) {
+        for (uint32_t i = 0; i < total_chunks; ++i) {
             uint64_t per_thread_start = start + i * chunk_size;
             uint64_t per_thread_end =
                     std::min(per_thread_start + chunk_size, end);
@@ -598,17 +642,13 @@ public:
             if (machine_id >= num_machines)
                 machine_id = num_machines > 0 ? num_machines - 1 : 0;
 
-            auto task = [=, &rfunc, &results, &remaining_tasks, &completion_mutex, &completion_condition] {
+            tasks.emplace_back([=, &rfunc, &results] {
                 for (uint64_t j = per_thread_start; j < per_thread_end; ++j)
                     rfunc(results[i], j);
-                complete_task(remaining_tasks, completion_mutex,
-                              completion_condition);
-            };
-            enqueue_to_machine_impl(machine_id, std::move(task));
-
-            if (per_thread_end == end) {
-                break;
-            }
+            });
+            enqueue_to_machine_impl(machine_id, tasks.back(), remaining_tasks,
+                                    completion_mutex,
+                                    completion_condition);
         }
         DEBUG_PRINT("Inserted reduce, time: %lu\n", rdtsc());
 
@@ -629,7 +669,9 @@ public:
         DEBUG_PRINT("Entering reduce, time: %lu\n", rdtsc());
 
         std::vector<T> results(threads, init);
-        std::atomic<int> remaining_tasks(threads);
+        std::atomic<uint32_t> remaining_tasks(threads);
+        std::vector<std::function<void()>> tasks;
+        tasks.reserve(threads);
         std::mutex completion_mutex;
         std::condition_variable completion_condition;
 
@@ -639,12 +681,12 @@ public:
             uint32_t machine_id = (num_machines > 0 && tps > 0) ? (t_i / tps) : 0;
             if (machine_id >= num_machines)
                 machine_id = num_machines > 0 ? num_machines - 1 : 0;
-            auto task = [&func, &results, t_i, &remaining_tasks, &completion_mutex, &completion_condition]() {
+            tasks.emplace_back([&func, &results, t_i]() {
                 results[t_i] = func(t_i);
-                complete_task(remaining_tasks, completion_mutex,
-                              completion_condition);
-            };
-            enqueue_to_machine_impl(machine_id, std::move(task));
+            });
+            enqueue_to_machine_impl(machine_id, tasks.back(), remaining_tasks,
+                                    completion_mutex,
+                                    completion_condition);
         }
 
         DEBUG_PRINT("Inserted reduce, time: %lu\n", rdtsc());

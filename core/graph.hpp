@@ -214,6 +214,48 @@ public:
     init();
   }
 
+  ~Graph() {
+#ifdef OS_CHCORE
+    if (use_incoming_replica) {
+      /* Each private replica PMO was created by a worker on its owning
+       * machine.  Revoke it there as well: process teardown runs on machine
+       * 0, whose buddy allocator cannot free another machine's DRAM pages. */
+      size_t total_edges = 0;
+      for (int s_i = 0; s_i < sockets; s_i++)
+        total_edges += (size_t)incoming_edges[s_i];
+      size_t adj_bytes = unit_size * total_edges;
+      if (adj_bytes == 0) adj_bytes = 1;
+      for (int m = 0; m < sockets; m++) {
+        Parallel::InvokeOnMachine((uint32_t)m, [this, m, adj_bytes](uint32_t) {
+          if (munmap(incoming_adj_list_replica[m][0], adj_bytes) != 0) {
+            fprintf(stderr,
+                    "GeminiGraph failed to release adjacency replica on machine %d\n",
+                    m);
+            abort();
+          }
+          for (int s_i = 0; s_i < sockets; s_i++) {
+            size_t index_bytes =
+                ((size_t)compressed_incoming_adj_vertices[s_i] + 1)
+                * sizeof(CompressedAdjIndexUnit);
+            if (munmap(compressed_incoming_adj_index_replica[m][s_i],
+                       index_bytes) != 0) {
+              fprintf(stderr,
+                      "GeminiGraph failed to release index replica on machine %d\n",
+                      m);
+              abort();
+            }
+          }
+          delete[] incoming_adj_list_replica[m];
+          delete[] compressed_incoming_adj_index_replica[m];
+        }, 0, 1);
+      }
+      delete[] incoming_adj_list_replica;
+      delete[] compressed_incoming_adj_index_replica;
+      use_incoming_replica = false;
+    }
+#endif
+  }
+
   inline int get_socket_id(int thread_id) const {
     return thread_id / threads_per_socket;
   }
@@ -396,6 +438,9 @@ public:
   }
   /* Allocate arbitrary-size buffer in CXL (shared); avoids cross-machine migration during replicate. */
   static void * alloc_cxl_raw(size_t bytes) {
+    /* mmap(size=0) reaches a kernel BUG in ChCore.  Empty graph partitions
+     * need a stable, non-dereferenced sentinel mapping instead. */
+    if (bytes == 0) bytes = 1;
     void * p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FLAG_SHARED, -1, 0);
     assert(p != NULL && p != MAP_FAILED);
@@ -403,6 +448,7 @@ public:
   }
   /* Allocate a machine-private buffer in local DRAM. */
   static void * alloc_dram_raw(size_t bytes) {
+    if (bytes == 0) bytes = 1;
     void * p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FLAG_PRIVATE, -1, 0);
     assert(p != NULL && p != MAP_FAILED);
