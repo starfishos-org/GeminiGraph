@@ -214,6 +214,9 @@ public:
     init();
   }
 
+  Graph(const Graph &) = delete;
+  Graph &operator=(const Graph &) = delete;
+
   ~Graph() {
 #ifdef OS_CHCORE
     if (use_incoming_replica) {
