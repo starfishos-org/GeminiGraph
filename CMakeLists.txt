@@ -18,6 +18,7 @@ set(OS DEFAULT)
 
 if(CMAKE_C_COMPILER MATCHES "musl-gcc")
     set(OS CHCORE)
+    include(${CHCORE_PROJECT_DIR}/kernel/dsm_config.cmake)
 endif()
 
 # 设置编译选项（不在这里加 PIE，由每个 target 单独控制）
@@ -49,6 +50,14 @@ foreach(target ${TARGETS})
             target_link_options(${target} PRIVATE -pie)
         endif()
         target_compile_definitions(${target} PRIVATE DSM_ENABLED OS_CHCORE)
+        # The incoming-adjacency replica is useful only when MAP_FLAG_PRIVATE
+        # really selects machine-local DRAM.  In the all-CXL configuration the
+        # kernel deliberately maps private allocations to CXL too; creating a
+        # full replica per machine then exhausts the 64-GiB CXL pool at N=8.
+        if (NOT DSM_MALLOC_MODE STREQUAL "CXL")
+            target_compile_definitions(
+                ${target} PRIVATE GEMINI_LOCAL_INCOMING_REPLICA)
+        endif()
     endif()
 endforeach()
 

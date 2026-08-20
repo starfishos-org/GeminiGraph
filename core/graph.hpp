@@ -2160,10 +2160,14 @@ public:
 
 #ifdef OS_CHCORE
     validate_loaded_graph();
-    /* Replicate after transposes so we copy the final incoming_adj_list used by compute */
+#ifdef GEMINI_LOCAL_INCOMING_REPLICA
+    /* Replicate after transposes so we copy the final incoming_adj_list used
+     * by compute.  This is a local-DRAM optimization and must stay disabled
+     * when DSM_MALLOC_MODE=CXL, where private mappings also consume CXL. */
     if (sockets > 1) {
       replicate_incoming_adj_list();
     }
+#endif
 #endif
 
     prep_time += WTime();
